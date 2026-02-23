@@ -1,15 +1,23 @@
 import fs from 'fs';
+import http from 'http';
 import path from 'path';
 
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  HEALTHCHECK_PING_URL,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  SLACK_APP_TOKEN,
+  SLACK_BOT_TOKEN,
+  SLACK_ONLY,
+  TAILSCALE_IP,
   TRIGGER_PATTERN,
+  WEBHOOK_PORT,
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
+import { SlackChannel } from './channels/slack.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -48,7 +56,7 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
+let whatsapp: WhatsAppChannel | null = null;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -434,9 +442,17 @@ async function main(): Promise<void> {
   };
 
   // Create and connect channels
-  whatsapp = new WhatsAppChannel(channelOpts);
-  channels.push(whatsapp);
-  await whatsapp.connect();
+  if (SLACK_BOT_TOKEN && SLACK_APP_TOKEN) {
+    const slack = new SlackChannel(SLACK_BOT_TOKEN, SLACK_APP_TOKEN, channelOpts);
+    channels.push(slack);
+    await slack.connect();
+  }
+
+  if (!SLACK_ONLY) {
+    whatsapp = new WhatsAppChannel(channelOpts);
+    channels.push(whatsapp);
+    await whatsapp.connect();
+  }
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -468,9 +484,65 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+
+  // Health endpoint — used by external monitors (UptimeRobot, gluon cron)
+  startHealthServer();
+
+  // Dead man's switch — ping external monitor every 5 minutes
+  if (HEALTHCHECK_PING_URL) {
+    const pingHealthcheck = () => {
+      fetch(HEALTHCHECK_PING_URL).catch(() => {});
+    };
+    pingHealthcheck(); // Ping immediately on startup
+    setInterval(pingHealthcheck, 5 * 60 * 1000);
+    logger.info('Healthcheck heartbeat enabled');
+  }
+
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);
+  });
+}
+
+const startupTime = Date.now();
+
+function startHealthServer(): void {
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      const slackConnected = channels.some(
+        (c) => c.name === 'slack' && c.isConnected(),
+      );
+      const anyChannelConnected = channels.some((c) => c.isConnected());
+      const uptimeSeconds = Math.floor((Date.now() - startupTime) / 1000);
+
+      const status = anyChannelConnected ? 'ok' : 'degraded';
+      const statusCode = anyChannelConnected ? 200 : 503;
+
+      const body = JSON.stringify({
+        status,
+        slack: { connected: slackConnected },
+        channels: channels.map((c) => ({ name: c.name, connected: c.isConnected() })),
+        uptime: uptimeSeconds,
+      });
+
+      res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+      res.end(body);
+    } else {
+      res.writeHead(404);
+      res.end('Not Found');
+    }
+  });
+
+  server.listen(WEBHOOK_PORT, TAILSCALE_IP, () => {
+    logger.info(
+      { host: TAILSCALE_IP, port: WEBHOOK_PORT },
+      'Health server listening',
+    );
+    console.log(`  Health: http://${TAILSCALE_IP}:${WEBHOOK_PORT}/health`);
+  });
+
+  server.on('error', (err) => {
+    logger.error({ err }, 'Health server error');
   });
 }
 

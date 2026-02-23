@@ -180,9 +180,29 @@ function buildVolumeMounts(
 /**
  * Read allowed secrets from .env for passing to the container via stdin.
  * Secrets are never written to disk or mounted as files.
+ *
+ * If neither env var is set, falls back to the live OAuth access token
+ * from Claude Code's credential store (~/.claude/.credentials.json).
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  const envSecrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  if (envSecrets.CLAUDE_CODE_OAUTH_TOKEN || envSecrets.ANTHROPIC_API_KEY) {
+    return envSecrets;
+  }
+
+  // Fall back to Claude Code's own OAuth token (auto-refreshed by the CLI)
+  try {
+    const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
+    const creds = JSON.parse(fs.readFileSync(credPath, 'utf-8'));
+    const token = creds?.claudeAiOauth?.accessToken;
+    if (token) {
+      return { CLAUDE_CODE_OAUTH_TOKEN: token };
+    }
+  } catch {
+    // Credential file missing or malformed — continue without
+  }
+
+  return envSecrets;
 }
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
