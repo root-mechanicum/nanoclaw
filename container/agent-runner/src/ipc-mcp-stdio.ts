@@ -274,6 +274,45 @@ Use available_groups.json to find the JID for a group. The folder name should be
   },
 );
 
+server.tool(
+  'send_email',
+  `Send an email. Main group only.
+
+Use for outbound email communication — replies, notifications, or forwarding information.`,
+  {
+    to: z.string().describe('Recipient email address'),
+    subject: z.string().describe('Email subject line'),
+    body: z.string().describe('Email body (plain text)'),
+    cc: z.string().optional().describe('CC recipient(s)'),
+    reply_to: z.string().optional().describe('Reply-To address'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can send emails.' }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'send_email',
+      email_to: args.to,
+      email_subject: args.subject,
+      email_body: args.body,
+      email_cc: args.cc || undefined,
+      email_reply_to: args.reply_to || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Email to ${args.to} queued for sending.` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

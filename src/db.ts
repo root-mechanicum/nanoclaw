@@ -7,6 +7,11 @@ import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.
 
 let db: Database.Database;
 
+/** Expose the database handle for modules that manage their own tables. */
+export function getDb(): Database.Database {
+  return db;
+}
+
 function createSchema(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
@@ -74,6 +79,26 @@ function createSchema(database: Database.Database): void {
       added_at TEXT NOT NULL,
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
+    );
+  `);
+
+  // --- Phase 1 resilience tables ---
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS blocker_escalation (
+      agent_mail_id INTEGER PRIMARY KEY,
+      sender TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      first_posted TEXT NOT NULL,
+      last_escalated TEXT NOT NULL,
+      escalation_level INTEGER DEFAULT 0,
+      resolved INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_liveness (
+      agent_name TEXT PRIMARY KEY,
+      last_message_ts TEXT NOT NULL,
+      task_description TEXT,
+      last_subject TEXT
     );
   `);
 
@@ -488,6 +513,10 @@ export function setSession(groupFolder: string, sessionId: string): void {
   db.prepare(
     'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
   ).run(groupFolder, sessionId);
+}
+
+export function deleteSession(groupFolder: string): void {
+  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
 
 export function getAllSessions(): Record<string, string> {

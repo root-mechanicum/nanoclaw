@@ -17,6 +17,26 @@ const envConfig = readEnvFile([
   'TAILSCALE_IP',
   'WEBHOOK_PORT',
   'HEALTHCHECK_PING_URL',
+  'AGENT_MAIL_API_URL',
+  'AGENT_MAIL_AUTH_TOKEN',
+  'AGENT_MAIL_PROJECT_KEY',
+  'AGENT_MAIL_AGENT_NAME',
+  'AGENT_MAIL_TARGET_JID',
+  'AGENT_MAIL_POLL_INTERVAL',
+  'SLACK_ALERTS_WEBHOOK',
+  'MAIL_IMAP_HOST',
+  'MAIL_IMAP_PORT',
+  'MAIL_IMAP_USER',
+  'MAIL_IMAP_PASS',
+  'MAIL_SMTP_HOST',
+  'MAIL_SMTP_PORT',
+  'MAIL_SMTP_USER',
+  'MAIL_SMTP_PASS',
+  'MAIL_FROM_ADDRESS',
+  'MAIL_FROM_NAME',
+  'MAIL_TARGET_JID',
+  'MAIL_POLL_INTERVAL',
+  'MAIN_GROUP_FOLDER',
 ]);
 
 export const ASSISTANT_NAME =
@@ -40,7 +60,7 @@ export const MOUNT_ALLOWLIST_PATH = path.join(
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
-export const MAIN_GROUP_FOLDER = 'main';
+export const MAIN_GROUP_FOLDER = envConfig.MAIN_GROUP_FOLDER || 'main';
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
@@ -97,3 +117,55 @@ export const WEBHOOK_PORT = parseInt(
 );
 export const HEALTHCHECK_PING_URL =
   process.env.HEALTHCHECK_PING_URL || envConfig.HEALTHCHECK_PING_URL || '';
+
+// Agent Mail configuration
+export const AGENT_MAIL_API_URL =
+  process.env.AGENT_MAIL_API_URL || envConfig.AGENT_MAIL_API_URL || '';
+export const AGENT_MAIL_AUTH_TOKEN =
+  process.env.AGENT_MAIL_AUTH_TOKEN || envConfig.AGENT_MAIL_AUTH_TOKEN || '';
+export const AGENT_MAIL_PROJECT_KEY =
+  process.env.AGENT_MAIL_PROJECT_KEY || envConfig.AGENT_MAIL_PROJECT_KEY || '';
+export const AGENT_MAIL_AGENT_NAME =
+  process.env.AGENT_MAIL_AGENT_NAME || envConfig.AGENT_MAIL_AGENT_NAME || 'OrangeFox';
+export const AGENT_MAIL_TARGET_JID =
+  process.env.AGENT_MAIL_TARGET_JID || envConfig.AGENT_MAIL_TARGET_JID || '';
+export const AGENT_MAIL_POLL_INTERVAL = parseInt(
+  process.env.AGENT_MAIL_POLL_INTERVAL || envConfig.AGENT_MAIL_POLL_INTERVAL || '15000',
+  10,
+);
+
+// Out-of-band Slack webhook for critical alerts (works even if bot is degraded)
+export const SLACK_ALERTS_WEBHOOK =
+  process.env.SLACK_ALERTS_WEBHOOK || envConfig.SLACK_ALERTS_WEBHOOK || '';
+
+// Email (Migadu IMAP/SMTP) configuration
+export const MAIL_IMAP_HOST =
+  process.env.MAIL_IMAP_HOST || envConfig.MAIL_IMAP_HOST || '';
+export const MAIL_IMAP_PORT = parseInt(
+  process.env.MAIL_IMAP_PORT || envConfig.MAIL_IMAP_PORT || '993',
+  10,
+);
+export const MAIL_IMAP_USER =
+  process.env.MAIL_IMAP_USER || envConfig.MAIL_IMAP_USER || '';
+export const MAIL_IMAP_PASS =
+  process.env.MAIL_IMAP_PASS || envConfig.MAIL_IMAP_PASS || '';
+export const MAIL_SMTP_HOST =
+  process.env.MAIL_SMTP_HOST || envConfig.MAIL_SMTP_HOST || '';
+export const MAIL_SMTP_PORT = parseInt(
+  process.env.MAIL_SMTP_PORT || envConfig.MAIL_SMTP_PORT || '465',
+  10,
+);
+export const MAIL_SMTP_USER =
+  process.env.MAIL_SMTP_USER || envConfig.MAIL_SMTP_USER || '';
+export const MAIL_SMTP_PASS =
+  process.env.MAIL_SMTP_PASS || envConfig.MAIL_SMTP_PASS || '';
+export const MAIL_FROM_ADDRESS =
+  process.env.MAIL_FROM_ADDRESS || envConfig.MAIL_FROM_ADDRESS || '';
+export const MAIL_FROM_NAME =
+  process.env.MAIL_FROM_NAME || envConfig.MAIL_FROM_NAME || 'NanoClaw PA';
+export const MAIL_TARGET_JID =
+  process.env.MAIL_TARGET_JID || envConfig.MAIL_TARGET_JID || AGENT_MAIL_TARGET_JID;
+export const MAIL_POLL_INTERVAL = parseInt(
+  process.env.MAIL_POLL_INTERVAL || envConfig.MAIL_POLL_INTERVAL || '60000',
+  10,
+);

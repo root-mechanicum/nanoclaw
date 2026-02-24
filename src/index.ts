@@ -3,19 +3,45 @@ import http from 'http';
 import path from 'path';
 
 import {
+  AGENT_MAIL_API_URL,
+  AGENT_MAIL_AUTH_TOKEN,
+  AGENT_MAIL_AGENT_NAME,
+  AGENT_MAIL_POLL_INTERVAL,
+  AGENT_MAIL_PROJECT_KEY,
+  AGENT_MAIL_TARGET_JID,
   ASSISTANT_NAME,
   DATA_DIR,
   HEALTHCHECK_PING_URL,
   IDLE_TIMEOUT,
+  MAIL_FROM_ADDRESS,
+  MAIL_FROM_NAME,
+  MAIL_IMAP_HOST,
+  MAIL_IMAP_PASS,
+  MAIL_IMAP_PORT,
+  MAIL_IMAP_USER,
+  MAIL_POLL_INTERVAL,
+  MAIL_SMTP_HOST,
+  MAIL_SMTP_PASS,
+  MAIL_SMTP_PORT,
+  MAIL_SMTP_USER,
+  MAIL_TARGET_JID,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  SLACK_ALERTS_CHANNEL,
   SLACK_APP_TOKEN,
   SLACK_BOT_TOKEN,
+  SLACK_BRIEFING_CHANNEL,
   SLACK_ONLY,
   TAILSCALE_IP,
   TRIGGER_PATTERN,
   WEBHOOK_PORT,
 } from './config.js';
+import { AgentMailPoller } from './agent-mail-poller.js';
+import { recordAgentActivity, getSilentAgents } from './agent-liveness.js';
+import { postAlert } from './alerts.js';
+import { trackBlocker, getStaleBlockers, escalateBlocker } from './blocker-tracker.js';
+import { EmailPoller } from './email-poller.js';
+import { EmailSender } from './email-sender.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import { SlackChannel } from './channels/slack.js';
 import {
@@ -26,6 +52,7 @@ import {
 } from './container-runner.js';
 import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
 import {
+  createTask,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -36,9 +63,11 @@ import {
   initDatabase,
   setRegisteredGroup,
   setRouterState,
+  deleteSession,
   setSession,
   storeChatMetadata,
   storeMessage,
+  updateTask,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
@@ -57,6 +86,9 @@ let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
 let whatsapp: WhatsAppChannel | null = null;
+let agentMailPoller: AgentMailPoller | null = null;
+let emailPoller: EmailPoller | null = null;
+let emailSender: EmailSender | null = null;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -288,6 +320,25 @@ async function runAgent(
       setSession(group.folder, output.newSessionId);
     }
 
+    // Detect AUP refusal — the session is now poisoned and must be reset
+    const aupPoisoned =
+      (output.result?.includes('violate our Usage Policy') ||
+        output.error?.includes('violate our Usage Policy'));
+    if (aupPoisoned && output.newSessionId) {
+      logger.warn(
+        { group: group.name, sessionId: output.newSessionId },
+        'AUP refusal detected, clearing poisoned session',
+      );
+      delete sessions[group.folder];
+      deleteSession(group.folder);
+      // Remove the session file so the next invocation starts fresh
+      const sessionFile = path.join(
+        DATA_DIR, 'sessions', group.folder, '.claude', 'projects',
+        '-workspace-group', `${output.newSessionId}.jsonl`,
+      );
+      try { fs.unlinkSync(sessionFile); } catch { /* already gone */ }
+    }
+
     if (output.status === 'error') {
       logger.error(
         { group: group.name, error: output.error },
@@ -369,20 +420,32 @@ async function startMessageLoop(): Promise<void> {
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend);
 
-          if (queue.sendMessage(chatJid, formatted)) {
-            logger.debug(
-              { chatJid, count: messagesToSend.length },
-              'Piped messages to active container',
+          if (queue.isActive(chatJid)) {
+            // Active container: only pipe non-email messages.
+            // Emails piped mid-query get lost (model doesn't attend to them).
+            // They stay in DB and get included in the next fresh invocation.
+            const nonEmailMessages = messagesToSend.filter(
+              (m) => !m.id.startsWith('email-'),
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
-            // Show typing indicator while the container processes the piped message
-            channel.setTyping?.(chatJid, true)?.catch((err) =>
-              logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-            );
+            if (nonEmailMessages.length > 0) {
+              const nonEmailFormatted = formatMessages(nonEmailMessages);
+              if (queue.sendMessage(chatJid, nonEmailFormatted)) {
+                logger.debug(
+                  { chatJid, count: nonEmailMessages.length },
+                  'Piped messages to active container',
+                );
+                // Only advance cursor for non-email messages
+                lastAgentTimestamp[chatJid] =
+                  nonEmailMessages[nonEmailMessages.length - 1].timestamp;
+                saveState();
+                channel.setTyping?.(chatJid, true)?.catch((err) =>
+                  logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+                );
+              }
+            }
+            // Email messages stay unadvanced — picked up next invocation
           } else {
-            // No active container — enqueue for a new one
+            // No active container — enqueue for a new one (includes emails)
             queue.enqueueMessageCheck(chatJid);
           }
         }
@@ -426,6 +489,8 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    agentMailPoller?.stop();
+    emailPoller?.stop();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -454,6 +519,70 @@ async function main(): Promise<void> {
     await whatsapp.connect();
   }
 
+  // Helper: send a message to #alerts via the Slack channel
+  const slackChannel = channels.find((c) => c.name === 'slack') ?? null;
+  const sendToAlerts = (text: string): void => {
+    if (!slackChannel || !SLACK_ALERTS_CHANNEL) return;
+    slackChannel.sendMessage(`sl:${SLACK_ALERTS_CHANNEL}`, text).catch((err) =>
+      logger.warn({ err }, 'Failed to send to #alerts'),
+    );
+  };
+
+  // Agent Mail injection poller (not a channel — injects into existing JID)
+  if (AGENT_MAIL_API_URL && AGENT_MAIL_AUTH_TOKEN) {
+    agentMailPoller = new AgentMailPoller({
+      apiUrl: AGENT_MAIL_API_URL,
+      authToken: AGENT_MAIL_AUTH_TOKEN,
+      projectKey: AGENT_MAIL_PROJECT_KEY,
+      agentName: AGENT_MAIL_AGENT_NAME,
+      targetChatJid: AGENT_MAIL_TARGET_JID,
+      onMessage: (_chatJid, msg) => storeMessage(msg),
+      pollIntervalMs: AGENT_MAIL_POLL_INTERVAL,
+      onDown: () => postAlert('Agent Mail is unreachable. Agent coordination is offline.'),
+      onRecovered: () => postAlert('Agent Mail connection restored.'),
+      onAlert: (text) => {
+        sendToAlerts(text);
+        // Track [BLOCKED] messages for escalation
+        const blockedMatch = text.match(/^\[BLOCKED\] (.+?): (.+)$/);
+        if (blockedMatch) {
+          const idMatch = text.match(/am-(\d+)/);
+          if (idMatch) trackBlocker(parseInt(idMatch[1], 10), blockedMatch[1], blockedMatch[2]);
+        }
+      },
+      onActivity: (sender, ts, subject) => recordAgentActivity(sender, ts, subject),
+    });
+    await agentMailPoller.start();
+  }
+
+  // Email (IMAP) poller — injects into the same PA channel
+  if (MAIL_IMAP_HOST && MAIL_IMAP_USER && MAIL_IMAP_PASS) {
+    emailPoller = new EmailPoller({
+      imapHost: MAIL_IMAP_HOST,
+      imapPort: MAIL_IMAP_PORT,
+      imapUser: MAIL_IMAP_USER,
+      imapPass: MAIL_IMAP_PASS,
+      targetChatJid: MAIL_TARGET_JID,
+      onMessage: (_chatJid, msg) => storeMessage(msg),
+      pollIntervalMs: MAIL_POLL_INTERVAL,
+      onDown: () => postAlert('Email (IMAP) is unreachable. Inbound email processing is offline.'),
+      onRecovered: () => postAlert('Email (IMAP) connection restored.'),
+    });
+    await emailPoller.start();
+  }
+
+  // Email (SMTP) sender
+  if (MAIL_SMTP_HOST && MAIL_SMTP_USER && MAIL_SMTP_PASS && MAIL_FROM_ADDRESS) {
+    emailSender = new EmailSender({
+      smtpHost: MAIL_SMTP_HOST,
+      smtpPort: MAIL_SMTP_PORT,
+      smtpUser: MAIL_SMTP_USER,
+      smtpPass: MAIL_SMTP_PASS,
+      fromAddress: MAIL_FROM_ADDRESS,
+      fromName: MAIL_FROM_NAME,
+    });
+    emailSender.verify().catch(() => {});
+  }
+
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -469,6 +598,8 @@ async function main(): Promise<void> {
       const text = formatOutbound(rawText);
       if (text) await channel.sendMessage(jid, text);
     },
+    emailPoller,
+    agentMailPoller,
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {
@@ -481,6 +612,9 @@ async function main(): Promise<void> {
     syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
+    sendEmail: emailSender
+      ? (args) => emailSender!.send(args)
+      : undefined,
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
@@ -496,6 +630,82 @@ async function main(): Promise<void> {
     pingHealthcheck(); // Ping immediately on startup
     setInterval(pingHealthcheck, 5 * 60 * 1000);
     logger.info('Healthcheck heartbeat enabled');
+  }
+
+  // Blocker re-escalation — check every 10 minutes for stale [BLOCKED] messages
+  setInterval(() => {
+    try {
+      const stale = getStaleBlockers();
+      for (const blocker of stale) {
+        const newLevel = blocker.escalation_level + 1;
+        const age = Math.round((Date.now() - new Date(blocker.first_posted).getTime()) / 60_000);
+        const msg = `Reminder (L${newLevel}): [BLOCKED] from ${blocker.sender} — "${blocker.subject}" — unresolved for ${age} min`;
+        sendToAlerts(msg);
+
+        // At L2+, also email PA's own inbox for out-of-band visibility
+        if (newLevel >= 2 && emailSender && MAIL_FROM_ADDRESS) {
+          emailSender.send({
+            to: MAIL_FROM_ADDRESS,
+            subject: `[BLOCKED L${newLevel}] ${blocker.subject}`,
+            body: msg,
+          }).catch((err) => logger.warn({ err }, 'Failed to send blocker escalation email'));
+        }
+
+        escalateBlocker(blocker.agent_mail_id, newLevel);
+      }
+    } catch (err) {
+      logger.error({ err }, 'Blocker escalation check failed');
+    }
+  }, 10 * 60 * 1000);
+
+  // Agent liveness monitor — check every 60 minutes for silent agents
+  setInterval(() => {
+    try {
+      const silent = getSilentAgents(6);
+      if (silent.length > 0) {
+        const summary = silent
+          .map((a) => `${a.agent_name} (last seen: ${a.last_message_ts}${a.last_subject ? `, re: ${a.last_subject}` : ''})`)
+          .join('\n');
+        sendToAlerts(`Silent agents (>6h):\n${summary}`);
+      }
+    } catch (err) {
+      logger.error({ err }, 'Agent liveness check failed');
+    }
+  }, 60 * 60 * 1000);
+
+  // Auto-register morning briefing task if SLACK_BRIEFING_CHANNEL is set
+  if (SLACK_BRIEFING_CHANNEL) {
+    const tasks = getAllTasks();
+    const hasBriefing = tasks.some((t) => t.prompt.includes('[Morning Briefing]') && t.status === 'active');
+    if (!hasBriefing) {
+      // Find the PA group JID
+      const paJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+      )?.[0];
+      if (paJid) {
+        const taskId = `briefing-${Date.now()}`;
+        createTask({
+          id: taskId,
+          group_folder: MAIN_GROUP_FOLDER,
+          chat_jid: paJid,
+          prompt: '[Morning Briefing] Collect system status and post a morning briefing to #briefing.',
+          schedule_type: 'cron',
+          schedule_value: '0 8 * * 1-5',
+          context_mode: 'isolated',
+          next_run: null, // Will be computed on first scheduler tick
+          status: 'active',
+          created_at: new Date().toISOString(),
+        });
+        // Compute next_run immediately
+        const { CronExpressionParser } = await import('cron-parser');
+        const { TIMEZONE } = await import('./config.js');
+        try {
+          const interval = CronExpressionParser.parse('0 8 * * 1-5', { tz: TIMEZONE });
+          updateTask(taskId, { next_run: interval.next().toISOString() });
+        } catch { /* ignore */ }
+        logger.info({ taskId }, 'Auto-registered morning briefing task');
+      }
+    }
   }
 
   startMessageLoop().catch((err) => {
@@ -518,10 +728,15 @@ function startHealthServer(): void {
       const status = anyChannelConnected ? 'ok' : 'degraded';
       const statusCode = anyChannelConnected ? 200 : 503;
 
+      const agentMail = agentMailPoller?.getStatus() ?? null;
+      const email = emailPoller?.getStatus() ?? null;
+
       const body = JSON.stringify({
         status,
         slack: { connected: slackConnected },
         channels: channels.map((c) => ({ name: c.name, connected: c.isConnected() })),
+        ...(agentMail && { agentMail }),
+        ...(email && { email }),
         uptime: uptimeSeconds,
       });
 

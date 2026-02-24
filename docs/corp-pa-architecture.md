@@ -1129,3 +1129,89 @@ More ways to reach the human. Automated briefings. GitHub awareness.
 - [ ] Richer briefings pulling from Agent Mail + Beads + Gmail + Calendar
 - [ ] Evaluate Twilio for voice calling (nice-to-have, not essential)
 - [ ] Gluon scales to 4 VPS — PA already connected via Tailscale, no changes needed
+
+---
+
+## Addendum A: PA + Dedicated PA Dev Agent (2026-02-23)
+
+**Status:** Approved. OrangeFox endorses this as the architecture path forward.
+
+### The Idea
+
+Split the current single-agent model into two cooperating agents:
+
+1. **PA Agent (OrangeFox)** — The user-facing assistant. Handles Slack, email, calendar, triage, briefings, and human coordination. Lives in the `pa` group container.
+
+2. **PA Dev Agent** — A dedicated NanoClaw infrastructure developer. Handles NanoClaw code changes, configuration, container builds, integration work, and operational improvements. Communicates with OrangeFox via Agent Mail. Lives in its own group/container with project root mounted.
+
+### Why This Is Better
+
+- **Separation of concerns.** The PA shouldn't be modifying its own runtime while also handling user requests. A PA that rewrites its own poller mid-conversation is fragile.
+- **Parallel work.** PA Dev can work on Phase 2 features (email integration, GitHub webhooks) while OrangeFox handles daily PA duties without interruption.
+- **Agent Mail dogfooding.** The PA Dev agent communicates with OrangeFox through the same Agent Mail infrastructure that gluon coding agents use. This validates and stress-tests the coordination layer.
+- **Clean failure domains.** PA Dev crashing doesn't affect OrangeFox's ability to relay messages and manage your inbox.
+- **Scalable pattern.** This is the same model as gluon coding agents — specialized workers coordinated through Agent Mail. The PA becomes a team, not a monolith.
+
+### Communication Flow
+
+```
+You (Slack) ──► OrangeFox (PA)
+                    │
+                    ├── Direct: email, calendar, triage, briefings
+                    │
+                    └── Agent Mail ──► PA Dev Agent
+                                          │
+                                     NanoClaw repo changes,
+                                     container builds,
+                                     integration work
+                                          │
+                                     Agent Mail ──► OrangeFox
+                                                      │
+                                                 Reports back to you
+```
+
+### Implementation
+
+- Register PA Dev as an Agent Mail agent on the same project
+- Give it a NanoClaw group with project root mounted (like `main` group access)
+- OrangeFox delegates dev tasks via Agent Mail: "Add Migadu email integration", "Fix the rate limiter bug"
+- PA Dev reports back via Agent Mail when done: `[DONE] Migadu IMAP integration complete, PR ready`
+
+### Phase 2 Adjustment
+
+PA Dev agent handles the build-out of Phase 2 features, coordinated by OrangeFox. This replaces the current model where the human directly drives all NanoClaw development.
+
+---
+
+## Addendum B: Migadu for Email (2026-02-23)
+
+**Decision:** Use Migadu instead of Gmail for email integration.
+
+### Why Migadu Over Gmail
+
+- **IMAP/SMTP native.** Standard protocols, no OAuth dance, no Google Cloud project, no consent screens. Just host + credentials.
+- **Privacy.** Swiss jurisdiction, no ad scanning, no data mining.
+- **Custom domain.** Professional email on your own domain out of the box.
+- **Simplicity.** No API quotas, no refresh token expiry, no Google Workspace complexity.
+- **Stable.** IMAP/SMTP won't change out from under you the way Google APIs do.
+
+### Integration Approach
+
+Replace the `/add-gmail` OAuth flow with standard IMAP/SMTP:
+
+- **Inbound (read):** IMAP IDLE or poll for new messages. Libraries: `imapflow` (modern, maintained, TypeScript-friendly).
+- **Outbound (send):** SMTP via `nodemailer`. Standard, battle-tested.
+- **Env vars:** `MAIL_IMAP_HOST`, `MAIL_IMAP_USER`, `MAIL_IMAP_PASS`, `MAIL_SMTP_HOST`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS`
+- **No MCP server needed.** Direct IMAP/SMTP from the container or host-level poller (same pattern as Agent Mail poller).
+
+### What This Changes
+
+| Phase 2 Item | Before (Gmail) | After (Migadu) |
+|-------------|----------------|-----------------|
+| Email setup | OAuth + GCP project + consent screen | IMAP/SMTP credentials in `.env` |
+| Email read | Gmail API (`messages.list`, `messages.get`) | IMAP (`imapflow`) |
+| Email send | Gmail API (`messages.send`) | SMTP (`nodemailer`) |
+| Calendar | Google Calendar API (shared OAuth) | Separate — needs its own solution (CalDAV or keep Google Calendar) |
+| Stale blocker email escalation | Gmail API | SMTP via Migadu |
+
+**Note:** Calendar integration is decoupled from email now. If using Google Calendar, it needs its own OAuth setup. Alternatively, use CalDAV if a Migadu-compatible calendar is set up.

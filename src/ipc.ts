@@ -26,6 +26,13 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  sendEmail?: (args: {
+    to: string;
+    subject: string;
+    body: string;
+    cc?: string;
+    replyTo?: string;
+  }) => Promise<{ messageId: string }>;
 }
 
 let ipcWatcherRunning = false;
@@ -169,6 +176,12 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For send_email
+    email_to?: string;
+    email_subject?: string;
+    email_body?: string;
+    email_cc?: string;
+    email_reply_to?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -370,6 +383,37 @@ export async function processTaskIpc(
           { data },
           'Invalid register_group request - missing required fields',
         );
+      }
+      break;
+
+    case 'send_email':
+      // Only main group can send emails
+      if (!isMain) {
+        logger.warn({ sourceGroup }, 'Unauthorized send_email attempt blocked');
+        break;
+      }
+      if (data.email_to && data.email_subject && data.email_body) {
+        if (!deps.sendEmail) {
+          logger.warn('send_email requested but email sender not configured');
+          break;
+        }
+        try {
+          const result = await deps.sendEmail({
+            to: data.email_to,
+            subject: data.email_subject,
+            body: data.email_body,
+            cc: data.email_cc,
+            replyTo: data.email_reply_to,
+          });
+          logger.info(
+            { messageId: result.messageId, to: data.email_to, sourceGroup },
+            'Email sent via IPC',
+          );
+        } catch (err) {
+          logger.error({ err, to: data.email_to }, 'IPC send_email failed');
+        }
+      } else {
+        logger.warn({ data }, 'Invalid send_email request - missing required fields');
       }
       break;
 

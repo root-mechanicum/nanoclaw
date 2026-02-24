@@ -22,12 +22,19 @@ import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
+import { collectBriefingData, formatBriefingPrompt, writeBriefingPayload } from './briefing.js';
+
+import type { AgentMailPoller } from './agent-mail-poller.js';
+import type { EmailPoller } from './email-poller.js';
+
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
   onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  emailPoller?: EmailPoller | null;
+  agentMailPoller?: AgentMailPoller | null;
 }
 
 async function runTask(
@@ -81,6 +88,22 @@ async function runTask(
     })),
   );
 
+  // Briefing pre-fetch: if task prompt includes [Morning Briefing], collect data
+  let prompt = task.prompt;
+  if (prompt.includes('[Morning Briefing]')) {
+    try {
+      const briefingData = collectBriefingData(
+        deps.emailPoller ?? null,
+        deps.agentMailPoller ?? null,
+      );
+      writeBriefingPayload(task.group_folder, briefingData);
+      prompt = formatBriefingPrompt(briefingData);
+      logger.info({ taskId: task.id }, 'Briefing data pre-fetched');
+    } catch (err) {
+      logger.error({ err, taskId: task.id }, 'Failed to collect briefing data');
+    }
+  }
+
   let result: string | null = null;
   let error: string | null = null;
 
@@ -107,7 +130,7 @@ async function runTask(
     const output = await runContainerAgent(
       group,
       {
-        prompt: task.prompt,
+        prompt,
         sessionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,

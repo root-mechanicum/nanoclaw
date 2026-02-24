@@ -431,7 +431,8 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*'
+        'mcp__nanoclaw__*',
+        'mcp__agent-mail__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -447,6 +448,15 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
+        ...(sdkEnv.AGENT_MAIL_AUTH_TOKEN && sdkEnv.AGENT_MAIL_CONTAINER_URL ? {
+          'agent-mail': {
+            type: 'http' as const,
+            url: sdkEnv.AGENT_MAIL_CONTAINER_URL,
+            headers: {
+              'Authorization': `Bearer ${sdkEnv.AGENT_MAIL_AUTH_TOKEN}`,
+            },
+          },
+        } : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook()] }],
