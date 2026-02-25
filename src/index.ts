@@ -324,10 +324,18 @@ async function runAgent(
     const aupPoisoned =
       (output.result?.includes('violate our Usage Policy') ||
         output.error?.includes('violate our Usage Policy'));
-    if (aupPoisoned && output.newSessionId) {
+
+    // Detect auth failure — session stuck after rate limit (Claude Code bug)
+    const authPoisoned =
+      (output.result?.includes('authentication_error') ||
+        output.error?.includes('authentication_error') ||
+        output.result?.includes('OAuth token has expired') ||
+        output.error?.includes('OAuth token has expired'));
+
+    if ((aupPoisoned || authPoisoned) && output.newSessionId) {
       logger.warn(
-        { group: group.name, sessionId: output.newSessionId },
-        'AUP refusal detected, clearing poisoned session',
+        { group: group.name, sessionId: output.newSessionId, reason: aupPoisoned ? 'aup' : 'auth' },
+        `${aupPoisoned ? 'AUP refusal' : 'Auth failure'} detected, clearing poisoned session`,
       );
       delete sessions[group.folder];
       deleteSession(group.folder);
