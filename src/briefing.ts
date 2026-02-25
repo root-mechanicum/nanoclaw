@@ -81,7 +81,7 @@ export function writeBriefingPayload(groupFolder: string, data: BriefingData): s
   return filepath;
 }
 
-export function formatBriefingPrompt(data: BriefingData): string {
+export function formatBriefingPrompt(data: BriefingData, briefingChannelId?: string): string {
   const sections: string[] = [];
 
   sections.push('[Morning Briefing]');
@@ -113,7 +113,10 @@ export function formatBriefingPrompt(data: BriefingData): string {
   sections.push(`- Email (IMAP): ${em ? em.status : 'not configured'}`);
 
   sections.push('\n---');
-  sections.push('Post a concise morning briefing to #briefing using the send_message tool. Include: blockers requiring attention, silent agents, infrastructure status, and any action items. Keep it short — bullet points, no fluff.');
+  const target = briefingChannelId
+    ? `Post the briefing to channel ID "${briefingChannelId}" (not the current channel) using the send_message tool with chat_jid "sl:${briefingChannelId}".`
+    : 'Post the briefing to #briefing using the send_message tool.';
+  sections.push(`${target} Include: blockers requiring attention, silent agents, infrastructure status, and any action items. Keep it short — bullet points, no fluff.`);
 
   return sections.join('\n');
 }

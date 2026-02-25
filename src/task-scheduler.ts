@@ -35,6 +35,7 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   emailPoller?: EmailPoller | null;
   agentMailPoller?: AgentMailPoller | null;
+  briefingChannelId?: string;
 }
 
 async function runTask(
@@ -97,7 +98,7 @@ async function runTask(
         deps.agentMailPoller ?? null,
       );
       writeBriefingPayload(task.group_folder, briefingData);
-      prompt = formatBriefingPrompt(briefingData);
+      prompt = formatBriefingPrompt(briefingData, deps.briefingChannelId);
       logger.info({ taskId: task.id }, 'Briefing data pre-fetched');
     } catch (err) {
       logger.error({ err, taskId: task.id }, 'Failed to collect briefing data');

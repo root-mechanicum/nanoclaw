@@ -427,17 +427,24 @@ async function startMessageLoop(): Promise<void> {
             const nonEmailMessages = messagesToSend.filter(
               (m) => !m.id.startsWith('email-'),
             );
+            const hasEmails = nonEmailMessages.length < messagesToSend.length;
             if (nonEmailMessages.length > 0) {
               const nonEmailFormatted = formatMessages(nonEmailMessages);
               if (queue.sendMessage(chatJid, nonEmailFormatted)) {
                 logger.debug(
-                  { chatJid, count: nonEmailMessages.length },
+                  { chatJid, count: nonEmailMessages.length, emailsDeferred: hasEmails },
                   'Piped messages to active container',
                 );
-                // Only advance cursor for non-email messages
-                lastAgentTimestamp[chatJid] =
-                  nonEmailMessages[nonEmailMessages.length - 1].timestamp;
-                saveState();
+                // If there are pending emails, DON'T advance cursor —
+                // otherwise piped non-emails after an email would jump
+                // the cursor past the email, permanently skipping it.
+                // The piped messages will be re-included next invocation
+                // (harmless — they're in session history already).
+                if (!hasEmails) {
+                  lastAgentTimestamp[chatJid] =
+                    nonEmailMessages[nonEmailMessages.length - 1].timestamp;
+                  saveState();
+                }
                 channel.setTyping?.(chatJid, true)?.catch((err) =>
                   logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
                 );
@@ -600,6 +607,7 @@ async function main(): Promise<void> {
     },
     emailPoller,
     agentMailPoller,
+    briefingChannelId: SLACK_BRIEFING_CHANNEL || undefined,
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {
