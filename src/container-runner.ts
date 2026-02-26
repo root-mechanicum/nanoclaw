@@ -42,6 +42,9 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  providerHint?: 'claude' | 'codex';
+  modelHint?: string;
+  providerReason?: string;
   secrets?: Record<string, string>;
 }
 

@@ -91,7 +91,7 @@ export class AgentMailPoller {
           project_key: this.opts.projectKey,
           name: this.opts.agentName,
           program: 'nanoclaw',
-          model: 'claude-opus-4-6',
+          model: 'claude-sonnet-4-5',
           task_description: 'NanoClaw PA injection poller',
         },
       });

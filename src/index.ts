@@ -91,6 +91,63 @@ let emailPoller: EmailPoller | null = null;
 let emailSender: EmailSender | null = null;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+const stickyProviderByChat = new Map<string, 'claude' | 'codex'>();
+
+interface ExecutionProfile {
+  providerHint: 'claude' | 'codex';
+  modelHint: string;
+  reason: string;
+}
+
+function chooseExecutionProfile(chatJid: string, messages: NewMessage[]): ExecutionProfile {
+  const defaultProvider =
+    (process.env.PA_PROVIDER_DEFAULT || 'codex').toLowerCase() === 'claude'
+      ? 'claude'
+      : 'codex';
+  const stickyEnabled =
+    !/^(0|false|no)$/i.test((process.env.PA_PROVIDER_STICKY || 'true').trim());
+  const cheapModel = process.env.PA_CHEAP_MODEL || process.env.NANOCLAW_MODEL || 'claude-sonnet-4-5';
+  const heavyModel = process.env.PA_HEAVY_MODEL || cheapModel;
+
+  const text = messages
+    .map((m) => `${m.sender_name || ''} ${m.content || ''}`.toLowerCase())
+    .join('\n');
+
+  const hasCodexOverride = /\[(use-codex|provider:codex)\]/i.test(text);
+  const hasClaudeOverride = /\[(use-claude|provider:claude)\]/i.test(text);
+  const needsHeavyReasoning =
+    /\b(strategy|governance|constitutional|tradeoff|architecture|discuss|long-form|briefing)\b/i.test(text);
+  const urgentOrBlocked = /\[(blocked|error|urgent)\]/i.test(text);
+
+  let provider: 'claude' | 'codex' = defaultProvider;
+  let reason = 'default';
+
+  if (hasClaudeOverride) {
+    provider = 'claude';
+    reason = 'explicit_claude_override';
+  } else if (hasCodexOverride) {
+    provider = 'codex';
+    reason = 'explicit_codex_override';
+  } else if (needsHeavyReasoning || urgentOrBlocked) {
+    provider = 'claude';
+    reason = needsHeavyReasoning ? 'complex_reasoning' : 'urgent_or_blocked';
+  } else if (stickyEnabled) {
+    const sticky = stickyProviderByChat.get(chatJid);
+    if (sticky) {
+      provider = sticky;
+      reason = 'sticky';
+    }
+  }
+
+  if (stickyEnabled) {
+    stickyProviderByChat.set(chatJid, provider);
+  }
+
+  // Codex adapter is not wired into NanoClaw yet; keep explicit provider choice
+  // for audit, but execute with a cheap Claude model for now.
+  const modelHint = provider === 'claude' ? heavyModel : cheapModel;
+  return { providerHint: provider, modelHint, reason };
+}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -212,7 +269,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const executionProfile = chooseExecutionProfile(chatJid, missedMessages);
+  logger.info(
+    {
+      group: group.name,
+      chatJid,
+      providerHint: executionProfile.providerHint,
+      modelHint: executionProfile.modelHint,
+      providerReason: executionProfile.reason,
+    },
+    'Execution profile selected',
+  );
+
+  const output = await runAgent(group, prompt, chatJid, executionProfile, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
@@ -260,10 +329,13 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  executionProfile: ExecutionProfile,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  const paCheapNoResume =
+    isMain && /^(1|true|yes)$/i.test((process.env.PA_CHEAP_NO_RESUME || '').trim());
+  const sessionId = paCheapNoResume ? undefined : sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -293,7 +365,7 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
+        if (output.newSessionId && !paCheapNoResume) {
           sessions[group.folder] = output.newSessionId;
           setSession(group.folder, output.newSessionId);
         }
@@ -310,12 +382,15 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        providerHint: executionProfile.providerHint,
+        modelHint: executionProfile.modelHint,
+        providerReason: executionProfile.reason,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
     );
 
-    if (output.newSessionId) {
+    if (output.newSessionId && !paCheapNoResume) {
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
     }

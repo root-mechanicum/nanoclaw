@@ -26,6 +26,9 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  providerHint?: 'claude' | 'codex';
+  modelHint?: string;
+  providerReason?: string;
   secrets?: Record<string, string>;
 }
 
@@ -57,6 +60,16 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+
+const NANOCLAW_DEFAULT_MODEL = process.env.NANOCLAW_MODEL || 'claude-sonnet-4-5';
+
+function resolveModel(containerInput: ContainerInput): string {
+  const provider = (containerInput.providerHint || process.env.PA_PROVIDER_DEFAULT || 'claude').toLowerCase();
+  if (provider === 'codex') {
+    log('Provider hint codex requested; codex runner not enabled in NanoClaw yet. Falling back to Claude model.');
+  }
+  return containerInput.modelHint || NANOCLAW_DEFAULT_MODEL;
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -412,10 +425,15 @@ async function runQuery(
   if (extraDirs.length > 0) {
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
+  const selectedModel = resolveModel(containerInput);
+  log(
+    `Execution provider=${containerInput.providerHint || process.env.PA_PROVIDER_DEFAULT || 'claude'} model=${selectedModel}${containerInput.providerReason ? ` reason=${containerInput.providerReason}` : ''}`,
+  );
 
   for await (const message of query({
     prompt: stream,
     options: {
+      model: selectedModel,
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
