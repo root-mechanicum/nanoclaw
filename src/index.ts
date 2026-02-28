@@ -71,6 +71,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
+import { detectMagicCommand } from './magic-commands.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -238,6 +239,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       TRIGGER_PATTERN.test(m.content.trim()),
     );
     if (!hasTrigger) return true;
+  }
+
+  // Magic commands: respond directly without spawning a container
+  const magic = detectMagicCommand(missedMessages, {
+    emailPoller,
+    agentMailPoller,
+  });
+  if (magic.handled) {
+    logger.info({ group: group.name }, `Magic command handled`);
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+    await channel.sendMessage(chatJid, magic.response);
+    return true;
   }
 
   const prompt = formatMessages(missedMessages);
