@@ -66,15 +66,72 @@ Triage inbound by tag:
 
 ## Beads (Project Tracking)
 
+### Reading beads (local, fast)
+
+The gluon filesystem is mounted read-only. Use `br-readonly` which copies the database to a temp directory:
+
 ```bash
-cd /workspace/extra/gluon
-/workspace/extra/tools/br list --status open --json
-/workspace/extra/tools/br list --status in_progress --json
-/workspace/extra/tools/br ready --label backend --json
-/workspace/extra/tools/br show <id> --json
+BEADS_SOURCE_DIR=/workspace/extra/gluon /workspace/extra/tools/br-readonly list --status open --json
+BEADS_SOURCE_DIR=/workspace/extra/gluon /workspace/extra/tools/br-readonly list --status in_progress --json
+BEADS_SOURCE_DIR=/workspace/extra/gluon /workspace/extra/tools/br-readonly ready --label backend --json
+BEADS_SOURCE_DIR=/workspace/extra/gluon /workspace/extra/tools/br-readonly show <id>
 ```
 
-Read-only — do not create, update, or close issues.
+### Writing beads (via dispatch proxy)
+
+To create, update, or close beads, send an Agent Mail message to **TealSparrow** (dispatch). Dispatch executes the `br` command locally and replies with `[ACK]` or `[NACK]`.
+
+**Close a bead:**
+```python
+send_message(
+    project_key="srv-gluon", sender_name="OrangeFox",
+    to=["TealSparrow"],
+    subject="[BR-CLOSE] bd-xxxx",
+    body_md="Reason for closing"
+)
+```
+
+**Update a bead** (status, assignee, priority):
+```python
+send_message(
+    project_key="srv-gluon", sender_name="OrangeFox",
+    to=["TealSparrow"],
+    subject="[BR-UPDATE] bd-xxxx",
+    body_md='{"status": "in_progress", "assignee": "pa-agent"}'
+)
+```
+
+**Create a bead:**
+```python
+send_message(
+    project_key="srv-gluon", sender_name="OrangeFox",
+    to=["TealSparrow"],
+    subject="[BR-CREATE]",
+    body_md='{"title": "...", "type": "task", "priority": 1, "labels": ["meta"], "assignee": "meta-agent"}'
+)
+```
+
+**Show a bead** (via proxy, if br-readonly is unavailable):
+```python
+send_message(
+    project_key="srv-gluon", sender_name="OrangeFox",
+    to=["TealSparrow"],
+    subject="[BR-SHOW] bd-xxxx",
+    body_md=""
+)
+```
+
+**List ready beads** (via proxy):
+```python
+send_message(
+    project_key="srv-gluon", sender_name="OrangeFox",
+    to=["TealSparrow"],
+    subject="[BR-READY]",
+    body_md='{"label": "backend"}'
+)
+```
+
+Dispatch replies with `[ACK] ...` (success) or `[NACK] ...` (failure). Check your inbox for the response.
 
 ## Context
 - Klaas runs a multi-agent coding setup (gluon) on Hetzner VPSes via Tailscale
