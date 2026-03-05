@@ -287,7 +287,17 @@ async function readSecrets(): Promise<Record<string, string>> {
     'ANTHROPIC_API_KEY',
     'AGENT_MAIL_AUTH_TOKEN',
     'AGENT_MAIL_CONTAINER_URL',
+    'GITHUB_TOKEN',
   ]);
+
+  // Fall back to process.env for secrets injected at runtime (e.g. by pass-cli)
+  // but not present in the .env file on disk.
+  for (const key of ['AGENT_MAIL_AUTH_TOKEN', 'AGENT_MAIL_CONTAINER_URL', 'GITHUB_TOKEN'] as const) {
+    if (!envSecrets[key] && process.env[key]) {
+      envSecrets[key] = process.env[key]!;
+    }
+  }
+
   if (envSecrets.CLAUDE_CODE_OAUTH_TOKEN || envSecrets.ANTHROPIC_API_KEY) {
     return envSecrets;
   }

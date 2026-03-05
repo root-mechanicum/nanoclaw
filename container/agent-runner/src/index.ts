@@ -200,7 +200,7 @@ function createPreCompactHook(): HookCallback {
 // Secrets to strip from Bash tool subprocess environments.
 // These are needed by claude-code for API auth but should never
 // be visible to commands Kit runs.
-const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GITHUB_TOKEN'];
 
 function createSanitizeBashHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
@@ -451,6 +451,7 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*',
         'mcp__agent-mail__*',
+        'mcp__github__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -472,6 +473,15 @@ async function runQuery(
             url: sdkEnv.AGENT_MAIL_CONTAINER_URL,
             headers: {
               'Authorization': `Bearer ${sdkEnv.AGENT_MAIL_AUTH_TOKEN}`,
+            },
+          },
+        } : {}),
+        ...(sdkEnv.GITHUB_TOKEN ? {
+          github: {
+            command: 'github-mcp-server',
+            args: ['stdio'] as string[],
+            env: {
+              GITHUB_PERSONAL_ACCESS_TOKEN: sdkEnv.GITHUB_TOKEN!,
             },
           },
         } : {}),

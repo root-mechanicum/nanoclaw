@@ -300,6 +300,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+
+      // Detect auth failure in streaming output — kill the container immediately
+      // so it doesn't keep looping with an expired token via IPC
+      const isAuthFailure =
+        raw.includes('authentication_error') ||
+        raw.includes('OAuth token has expired');
+      if (isAuthFailure) {
+        logger.warn(
+          { group: group.name },
+          'Auth failure detected in streaming output, killing container to force fresh token on next spawn',
+        );
+        queue.closeStdin(chatJid);
+        hadError = true;
+        return;
+      }
+
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);

@@ -25,6 +25,14 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Install GitHub MCP server binary
+RUN GITHUB_MCP_VERSION=0.1.0 && \
+    curl -L "https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_VERSION}/github-mcp-server_Linux_x86_64.tar.gz" \
+    -o /tmp/github-mcp.tar.gz && \
+    tar -xzf /tmp/github-mcp.tar.gz -C /usr/local/bin github-mcp-server && \
+    chmod +x /usr/local/bin/github-mcp-server && \
+    rm /tmp/github-mcp.tar.gz
+
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium

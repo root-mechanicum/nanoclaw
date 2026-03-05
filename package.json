@@ -13,7 +13,8 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "tokens:report": "node --import tsx scripts/token-usage-report.ts"
   },
   "dependencies": {
     "@slack/bolt": "^4.6.0",
