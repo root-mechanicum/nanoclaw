@@ -79,15 +79,16 @@ export class EmailPoller {
       client = new ImapFlow({
         host: this.opts.imapHost,
         port: this.opts.imapPort,
-        secure: true,
+        secure: this.opts.imapPort === 993,
         auth: { user: this.opts.imapUser, pass: this.opts.imapPass },
         logger: false,
+        tls: { rejectUnauthorized: false },
       });
 
       await client.connect();
+      await client.mailboxOpen('INBOX');
 
-      const lock = await client.getMailboxLock('INBOX');
-      try {
+      {
         // Determine search range
         const isFirstRun = this.lastUid === 0;
         let searchCriteria: Record<string, unknown>;
@@ -128,10 +129,9 @@ export class EmailPoller {
         for (const uid of toFetch) {
           try {
             const msg = await client.fetchOne(String(uid), {
-              uid: true,
               envelope: true,
-              source: true,
-            });
+              bodyParts: ['TEXT'],
+            }, { uid: true });
 
             if (!msg) continue;
 
@@ -144,8 +144,9 @@ export class EmailPoller {
             const toAddr = envelope.to?.[0]?.address || 'unknown';
             const subject = envelope.subject || '(no subject)';
 
-            // Extract body text
-            const body = this.extractBody(msg.source);
+            // Extract body text from bodyParts
+            const textPart = msg.bodyParts?.get('TEXT');
+            const body = textPart ? textPart.toString('utf-8').slice(0, BODY_MAX_LENGTH) : '';
 
             const newMsg: NewMessage = {
               id: `email-${uid}`,
@@ -176,8 +177,6 @@ export class EmailPoller {
         if (toFetch.length > 0) {
           setRouterState(CURSOR_KEY, this.lastUid.toString());
         }
-      } finally {
-        lock.release();
       }
 
       this.lastPollTs = new Date().toISOString();
@@ -209,12 +208,9 @@ export class EmailPoller {
         logger.warn({ err, failures: this.consecutiveFailures }, 'Email: poll failed');
       }
     } finally {
+      logger.info('Email: poll cycle complete, cleaning up');
       if (client) {
-        try {
-          await client.logout();
-        } catch {
-          // ignore logout errors
-        }
+        try { client.close(); } catch { /* ignore */ }
       }
     }
   }

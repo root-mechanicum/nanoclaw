@@ -24,6 +24,7 @@ export class EmailSender {
       port: opts.smtpPort,
       secure: opts.smtpPort === 465,
       auth: { user: opts.smtpUser, pass: opts.smtpPass },
+      tls: { rejectUnauthorized: false },
     });
     this.from = `${opts.fromName} <${opts.fromAddress}>`;
   }
