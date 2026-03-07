@@ -33,6 +33,7 @@ export interface IpcDeps {
     cc?: string;
     replyTo?: string;
   }) => Promise<{ messageId: string }>;
+  fetchEmails?: () => Promise<void>;
 }
 
 let ipcWatcherRunning = false;
@@ -414,6 +415,24 @@ export async function processTaskIpc(
         }
       } else {
         logger.warn({ data }, 'Invalid send_email request - missing required fields');
+      }
+      break;
+
+    case 'fetch_emails':
+      // Only main group can trigger email fetch
+      if (!isMain) {
+        logger.warn({ sourceGroup }, 'Unauthorized fetch_emails attempt blocked');
+        break;
+      }
+      if (deps.fetchEmails) {
+        try {
+          await deps.fetchEmails();
+          logger.info({ sourceGroup }, 'Email fetch triggered via IPC');
+        } catch (err) {
+          logger.error({ err }, 'IPC fetch_emails failed');
+        }
+      } else {
+        logger.warn('fetch_emails requested but email poller not configured');
       }
       break;
 

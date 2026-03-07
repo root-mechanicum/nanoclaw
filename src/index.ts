@@ -671,6 +671,23 @@ async function main(): Promise<void> {
       onRecovered: () => postAlert('Email (IMAP) connection restored.'),
     });
     await emailPoller.start();
+
+    // Write email snapshot to main group's IPC dir for container MCP tools
+    const emailSnapshotPath = path.join(DATA_DIR, 'ipc', MAIN_GROUP_FOLDER, 'email_inbox.json');
+    const writeEmailSnapshot = () => {
+      try {
+        emailPoller!.writeSnapshot(emailSnapshotPath);
+      } catch (err) {
+        logger.warn({ err }, 'Failed to write email snapshot');
+      }
+    };
+    // Seed cache with recent emails on startup (reads all recent, not just unseen)
+    emailPoller.fetchRecent(100).then(() => {
+      writeEmailSnapshot();
+      logger.info('Email cache seeded on startup');
+    }).catch((err) => logger.warn({ err }, 'Failed to seed email cache'));
+    // Write after each poll cycle (match poll interval)
+    setInterval(writeEmailSnapshot, MAIL_POLL_INTERVAL);
   }
 
   // Email (SMTP) sender
@@ -718,6 +735,13 @@ async function main(): Promise<void> {
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
     sendEmail: emailSender
       ? (args) => emailSender!.send(args)
+      : undefined,
+    fetchEmails: emailPoller
+      ? async () => {
+          const snapshotPath = path.join(DATA_DIR, 'ipc', MAIN_GROUP_FOLDER, 'email_inbox.json');
+          await emailPoller!.fetchRecent();
+          emailPoller!.writeSnapshot(snapshotPath);
+        }
       : undefined,
   });
   queue.setProcessMessagesFn(processGroupMessages);

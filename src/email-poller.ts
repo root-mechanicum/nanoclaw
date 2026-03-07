@@ -4,11 +4,24 @@
  * Polls an IMAP inbox and injects messages into an existing chat JID,
  * following the same pattern as AgentMailPoller.
  */
+import fs from 'fs';
+import path from 'path';
+
 import { ImapFlow } from 'imapflow';
 
 import { getRouterState, setRouterState } from './db.js';
 import { logger } from './logger.js';
 import { NewMessage } from './types.js';
+
+export interface CachedEmail {
+  uid: number;
+  from: string;
+  fromAddress: string;
+  to: string;
+  subject: string;
+  date: string;
+  body: string;
+}
 
 export interface EmailPollerOpts {
   imapHost: string;
@@ -28,6 +41,7 @@ const CURSOR_KEY = 'email_last_uid';
 const MAX_PER_POLL = 50;
 const FIRST_RUN_LIMIT = 10;
 const BODY_MAX_LENGTH = 10_000;
+const MAX_CACHED_EMAILS = 200;
 
 export class EmailPoller {
   private opts: EmailPollerOpts;
@@ -36,6 +50,7 @@ export class EmailPoller {
   private consecutiveFailures = 0;
   private status: PollerStatus = 'down';
   private lastPollTs: string | null = null;
+  private emailCache: CachedEmail[] = [];
 
   constructor(opts: EmailPollerOpts) {
     this.opts = opts;
@@ -71,6 +86,18 @@ export class EmailPoller {
 
   getStatus(): { status: PollerStatus; lastPollTs: string | null } {
     return { status: this.status, lastPollTs: this.lastPollTs };
+  }
+
+  getCachedEmails(): CachedEmail[] {
+    return this.emailCache;
+  }
+
+  writeSnapshot(filepath: string): void {
+    const dir = path.dirname(filepath);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${filepath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this.emailCache, null, 2));
+    fs.renameSync(tmp, filepath);
   }
 
   private async poll(): Promise<void> {
@@ -161,6 +188,20 @@ export class EmailPoller {
 
             this.opts.onMessage(this.opts.targetChatJid, newMsg);
 
+            // Cache for MCP tools
+            this.emailCache.push({
+              uid,
+              from: senderName,
+              fromAddress: senderAddress,
+              to: toAddr,
+              subject,
+              date: envelope.date?.toISOString() || new Date().toISOString(),
+              body,
+            });
+            if (this.emailCache.length > MAX_CACHED_EMAILS) {
+              this.emailCache = this.emailCache.slice(-MAX_CACHED_EMAILS);
+            }
+
             // Mark as \Seen
             await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
 
@@ -209,6 +250,80 @@ export class EmailPoller {
       }
     } finally {
       logger.info('Email: poll cycle complete, cleaning up');
+      if (client) {
+        try { client.close(); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  /**
+   * On-demand fetch of recent emails into cache (read-only, no \Seen flag).
+   * Used by the fetch_emails IPC command for immediate refresh.
+   */
+  async fetchRecent(limit = 50): Promise<CachedEmail[]> {
+    let client: ImapFlow | null = null;
+    try {
+      client = new ImapFlow({
+        host: this.opts.imapHost,
+        port: this.opts.imapPort,
+        secure: this.opts.imapPort === 993,
+        auth: { user: this.opts.imapUser, pass: this.opts.imapPass },
+        logger: false,
+        tls: { rejectUnauthorized: false },
+      });
+      await client.connect();
+      await client.mailboxOpen('INBOX');
+
+      const results = await client.search({}, { uid: true });
+      if (!results || results.length === 0) return this.emailCache;
+
+      const uids = [...results].sort((a, b) => a - b).slice(-limit);
+      const fetched: CachedEmail[] = [];
+
+      for (const uid of uids) {
+        // Skip if already cached
+        if (this.emailCache.some((e) => e.uid === uid)) continue;
+
+        try {
+          const msg = await client.fetchOne(String(uid), {
+            envelope: true,
+            bodyParts: ['TEXT'],
+          }, { uid: true });
+
+          if (!msg || !('envelope' in msg) || !msg.envelope) continue;
+
+          const envelope = msg.envelope;
+          const fromAddr = envelope.from?.[0];
+          const senderName = fromAddr?.name || fromAddr?.address || 'Unknown';
+          const senderAddress = fromAddr?.address || 'unknown@unknown';
+          const toAddr = envelope.to?.[0]?.address || 'unknown';
+          const subject = envelope.subject || '(no subject)';
+          const textPart = (msg as { bodyParts?: Map<string, Buffer> }).bodyParts?.get('TEXT');
+          const body = textPart ? textPart.toString('utf-8').slice(0, BODY_MAX_LENGTH) : '';
+
+          const cached: CachedEmail = {
+            uid,
+            from: senderName,
+            fromAddress: senderAddress,
+            to: toAddr,
+            subject,
+            date: envelope.date?.toISOString() || new Date().toISOString(),
+            body,
+          };
+
+          fetched.push(cached);
+          this.emailCache.push(cached);
+        } catch (err) {
+          logger.warn({ err, uid }, 'fetchRecent: failed to process message');
+        }
+      }
+
+      if (this.emailCache.length > MAX_CACHED_EMAILS) {
+        this.emailCache = this.emailCache.slice(-MAX_CACHED_EMAILS);
+      }
+
+      return this.emailCache;
+    } finally {
       if (client) {
         try { client.close(); } catch { /* ignore */ }
       }

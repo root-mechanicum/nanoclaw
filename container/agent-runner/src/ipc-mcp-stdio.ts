@@ -317,6 +317,140 @@ Use for outbound email communication — replies, notifications, or forwarding i
   },
 );
 
+// --- Inbound Email Tools (read-only, from host snapshot) ---
+
+const EMAIL_INBOX_PATH = path.join(IPC_DIR, 'email_inbox.json');
+
+interface CachedEmail {
+  uid: number;
+  from: string;
+  fromAddress: string;
+  to: string;
+  subject: string;
+  date: string;
+  body: string;
+}
+
+function readEmailSnapshot(): CachedEmail[] {
+  try {
+    if (!fs.existsSync(EMAIL_INBOX_PATH)) return [];
+    return JSON.parse(fs.readFileSync(EMAIL_INBOX_PATH, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+server.tool(
+  'list_emails',
+  `List recent inbound emails. Main group only. Returns email summaries (uid, from, subject, date) without full bodies. Use get_email to retrieve the full body of a specific email.`,
+  {
+    limit: z.number().optional().describe('Max emails to return (default 20, newest first)'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can read emails.' }], isError: true };
+    }
+
+    const emails = readEmailSnapshot();
+    const limit = args.limit ?? 20;
+    const recent = emails.slice(-limit).reverse();
+
+    if (recent.length === 0) {
+      return { content: [{ type: 'text' as const, text: 'No emails in inbox cache. Use refresh_emails to trigger a fresh fetch.' }] };
+    }
+
+    const lines = recent.map((e) =>
+      `[uid:${e.uid}] ${e.date} | From: ${e.from} <${e.fromAddress}> | To: ${e.to} | Subject: ${e.subject}`
+    );
+
+    return { content: [{ type: 'text' as const, text: `${recent.length} emails (newest first):\n\n${lines.join('\n')}` }] };
+  },
+);
+
+server.tool(
+  'get_email',
+  `Get the full content of an email by UID. Main group only. Use list_emails first to find the UID.`,
+  {
+    uid: z.number().describe('The email UID from list_emails'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can read emails.' }], isError: true };
+    }
+
+    const emails = readEmailSnapshot();
+    const email = emails.find((e) => e.uid === args.uid);
+
+    if (!email) {
+      return { content: [{ type: 'text' as const, text: `Email uid:${args.uid} not found in cache. It may have been evicted or the UID is incorrect.` }], isError: true };
+    }
+
+    const header = [
+      `UID: ${email.uid}`,
+      `Date: ${email.date}`,
+      `From: ${email.from} <${email.fromAddress}>`,
+      `To: ${email.to}`,
+      `Subject: ${email.subject}`,
+    ].join('\n');
+
+    return { content: [{ type: 'text' as const, text: `${header}\n\n---\n\n${email.body || '(empty body)'}` }] };
+  },
+);
+
+server.tool(
+  'search_emails',
+  `Search emails by keyword in subject, sender, or body. Main group only. Case-insensitive.`,
+  {
+    query: z.string().describe('Search keyword'),
+    limit: z.number().optional().describe('Max results (default 10)'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can read emails.' }], isError: true };
+    }
+
+    const emails = readEmailSnapshot();
+    const q = args.query.toLowerCase();
+    const limit = args.limit ?? 10;
+
+    const matches = emails.filter((e) =>
+      e.subject.toLowerCase().includes(q) ||
+      e.from.toLowerCase().includes(q) ||
+      e.fromAddress.toLowerCase().includes(q) ||
+      e.body.toLowerCase().includes(q)
+    ).slice(-limit).reverse();
+
+    if (matches.length === 0) {
+      return { content: [{ type: 'text' as const, text: `No emails matching "${args.query}".` }] };
+    }
+
+    const lines = matches.map((e) =>
+      `[uid:${e.uid}] ${e.date} | From: ${e.from} <${e.fromAddress}> | Subject: ${e.subject}`
+    );
+
+    return { content: [{ type: 'text' as const, text: `${matches.length} matches for "${args.query}":\n\n${lines.join('\n')}` }] };
+  },
+);
+
+server.tool(
+  'refresh_emails',
+  `Trigger an immediate email fetch from the IMAP server. Main group only. The email inbox cache is updated automatically every polling cycle, but use this to force a refresh now.`,
+  {},
+  async () => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can manage emails.' }], isError: true };
+    }
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'fetch_emails',
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return { content: [{ type: 'text' as const, text: 'Email refresh requested. The inbox cache will be updated shortly. Wait a few seconds then use list_emails.' }] };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
