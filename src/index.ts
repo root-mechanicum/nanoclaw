@@ -677,11 +677,14 @@ async function main(): Promise<void> {
 
   // Helper: post to #emails channel (raw email visibility for human)
   const sendToEmails = async (from: string, to: string, subject: string, body: string): Promise<void> => {
-    if (!SLACK_BOT_TOKEN || !SLACK_EMAILS_CHANNEL) return;
+    if (!SLACK_BOT_TOKEN || !SLACK_EMAILS_CHANNEL) {
+      logger.info({ hasBotToken: !!SLACK_BOT_TOKEN, channel: SLACK_EMAILS_CHANNEL }, 'sendToEmails: skipped (missing config)');
+      return;
+    }
     const preview = body.length > 500 ? body.slice(0, 500) + '...' : body;
     const text = `*From:* ${from}\n*To:* ${to}\n*Subject:* ${subject}\n\n${preview}`;
     try {
-      await fetch('https://slack.com/api/chat.postMessage', {
+      const resp = await fetch('https://slack.com/api/chat.postMessage', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
@@ -690,6 +693,12 @@ async function main(): Promise<void> {
         body: JSON.stringify({ channel: SLACK_EMAILS_CHANNEL, text }),
         signal: AbortSignal.timeout(5_000),
       });
+      const data = await resp.json() as { ok: boolean; error?: string };
+      if (data.ok) {
+        logger.info({ from, subject }, 'Email posted to #emails');
+      } else {
+        logger.warn({ error: data.error, channel: SLACK_EMAILS_CHANNEL }, 'Slack rejected #emails post');
+      }
     } catch (err) {
       logger.warn({ err }, 'Failed to send to #emails');
     }

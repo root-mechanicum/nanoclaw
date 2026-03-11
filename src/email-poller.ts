@@ -30,7 +30,7 @@ export interface EmailPollerOpts {
   imapPass: string;
   targetChatJid: string;
   onMessage: (chatJid: string, msg: NewMessage) => void;
-  onEmail?: (email: CachedEmail) => void;
+  onEmail?: (email: CachedEmail) => void | Promise<void>;
   pollIntervalMs: number;
   onDown?: () => void;
   onRecovered?: () => void;
@@ -203,7 +203,13 @@ export class EmailPoller {
 
             // Fire structured email callback (e.g. for Slack #emails mirror)
             if (this.opts.onEmail) {
-              try { this.opts.onEmail(cachedEmail); } catch { /* non-fatal */ }
+              try {
+                logger.debug({ uid, subject }, 'Email: firing onEmail callback');
+                const result = this.opts.onEmail(cachedEmail);
+                if (result && typeof (result as any).catch === 'function') {
+                  (result as any).catch((err: unknown) => logger.warn({ err }, 'onEmail callback failed'));
+                }
+              } catch (cbErr) { logger.warn({ err: cbErr }, 'onEmail callback threw'); }
             }
             if (this.emailCache.length > MAX_CACHED_EMAILS) {
               this.emailCache = this.emailCache.slice(-MAX_CACHED_EMAILS);
