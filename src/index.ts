@@ -49,6 +49,7 @@ import { SlackChannel } from './channels/slack.js';
 import {
   ContainerOutput,
   runContainerAgent,
+  writeFleetSnapshot,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -394,6 +395,9 @@ async function runAgent(
     availableGroups,
     new Set(Object.keys(registeredGroups)),
   );
+
+  // Write fleet state snapshot from bd agent beads (PA only)
+  writeFleetSnapshot(group.folder, isMain);
 
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput

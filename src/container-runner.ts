@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, exec, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -783,4 +783,70 @@ export function writeGroupsSnapshot(
       2,
     ),
   );
+}
+
+/**
+ * Write fleet state snapshot from bd agent beads.
+ * Only written for main (PA) group — gives PA ground-truth fleet status.
+ */
+export function writeFleetSnapshot(groupFolder: string, isMain: boolean): void {
+  if (!isMain) return;
+
+  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+  const fleetFile = path.join(groupIpcDir, 'fleet-state.json');
+
+  try {
+    const raw = execSync('/usr/local/bin/bd query "type=agent" --json', {
+      encoding: 'utf-8',
+      timeout: 10000,
+      cwd: '/srv/gluon/dev',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const beads = JSON.parse(raw) as Array<{
+      id: string;
+      title: string;
+      assignee?: string;
+      agent_state?: string;
+      updated_at?: string;
+    }>;
+
+    // Enrich with agent show data for last_activity
+    const fleet = beads.map((b) => {
+      let lastActivity: string | null = null;
+      let state = b.agent_state || 'unknown';
+      try {
+        const detail = execSync(`/usr/local/bin/bd agent show ${b.id} --json`, {
+          encoding: 'utf-8',
+          timeout: 5000,
+          cwd: '/srv/gluon/dev',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        const parsed = JSON.parse(detail);
+        lastActivity = parsed.last_activity || null;
+        state = parsed.agent_state || state;
+      } catch { /* skip enrichment */ }
+
+      const nameMatch = b.title.match(/^(\w+)\s*\(([^)]+)\)/);
+      return {
+        name: nameMatch?.[1] || b.title,
+        role: nameMatch?.[2] || b.assignee || 'unknown',
+        beadId: b.id,
+        state,
+        lastActivity,
+      };
+    });
+
+    fs.writeFileSync(fleetFile, JSON.stringify({
+      fleet,
+      generatedAt: new Date().toISOString(),
+    }, null, 2));
+  } catch {
+    // bd unavailable — write empty state
+    fs.writeFileSync(fleetFile, JSON.stringify({
+      fleet: [],
+      generatedAt: new Date().toISOString(),
+      error: 'bd unavailable',
+    }, null, 2));
+  }
 }
