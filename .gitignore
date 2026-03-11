@@ -36,3 +36,4 @@ groups/pa/*
 .nanoclaw/
 
 agents-sdk-docs
+.env.static

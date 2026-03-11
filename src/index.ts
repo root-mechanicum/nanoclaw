@@ -29,6 +29,8 @@ import {
   POLL_INTERVAL,
   SLACK_ALERTS_CHANNEL,
   SLACK_APP_TOKEN,
+  SLACK_BLOCKERS_CHANNEL,
+  SLACK_EMAILS_CHANNEL,
   SLACK_BOT_TOKEN,
   SLACK_BRIEFING_CHANNEL,
   SLACK_ONLY,
@@ -39,7 +41,7 @@ import {
 import { AgentMailPoller } from './agent-mail-poller.js';
 import { recordAgentActivity, getSilentAgents } from './agent-liveness.js';
 import { postAlert } from './alerts.js';
-import { trackBlocker, getStaleBlockers, escalateBlocker } from './blocker-tracker.js';
+import { trackBlocker, getStaleBlockers, escalateBlocker, setBlockerSlackTs, resolveBlocker, clearResolvedBlocker } from './blocker-tracker.js';
 import { EmailPoller } from './email-poller.js';
 import { EmailSender } from './email-sender.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
@@ -631,6 +633,68 @@ async function main(): Promise<void> {
     );
   };
 
+  // Helper: send a message to #blockers via Slack API directly (returns message ts for later deletion)
+  const sendToBlockers = async (text: string): Promise<string | null> => {
+    if (!SLACK_BOT_TOKEN || !SLACK_BLOCKERS_CHANNEL) return null;
+    try {
+      const resp = await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ channel: SLACK_BLOCKERS_CHANNEL, text }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      const data = await resp.json() as { ok: boolean; ts?: string };
+      if (data.ok && data.ts) return data.ts;
+      logger.warn({ data }, 'Slack postMessage to #blockers returned non-ok');
+      return null;
+    } catch (err) {
+      logger.warn({ err }, 'Failed to send to #blockers');
+      return null;
+    }
+  };
+
+  // Helper: delete a message from #blockers by ts
+  const deleteFromBlockers = async (ts: string): Promise<void> => {
+    if (!SLACK_BOT_TOKEN || !SLACK_BLOCKERS_CHANNEL) return;
+    try {
+      await fetch(`https://slack.com/api/chat.delete`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ channel: SLACK_BLOCKERS_CHANNEL, ts }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      logger.info({ ts }, 'Deleted resolved blocker from #blockers');
+    } catch (err) {
+      logger.warn({ err, ts }, 'Failed to delete blocker from #blockers');
+    }
+  };
+
+  // Helper: post to #emails channel (raw email visibility for human)
+  const sendToEmails = async (from: string, to: string, subject: string, body: string): Promise<void> => {
+    if (!SLACK_BOT_TOKEN || !SLACK_EMAILS_CHANNEL) return;
+    const preview = body.length > 500 ? body.slice(0, 500) + '...' : body;
+    const text = `*From:* ${from}\n*To:* ${to}\n*Subject:* ${subject}\n\n${preview}`;
+    try {
+      await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ channel: SLACK_EMAILS_CHANNEL, text }),
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch (err) {
+      logger.warn({ err }, 'Failed to send to #emails');
+    }
+  };
+
   // Agent Mail injection poller (not a channel — injects into existing JID)
   if (AGENT_MAIL_API_URL && AGENT_MAIL_AUTH_TOKEN) {
     agentMailPoller = new AgentMailPoller({
@@ -645,11 +709,29 @@ async function main(): Promise<void> {
       onRecovered: () => postAlert('Agent Mail connection restored.'),
       onAlert: (text) => {
         sendToAlerts(text);
-        // Track [BLOCKED] messages for escalation
+        // Track [BLOCKED] messages for escalation → post to #blockers
         const blockedMatch = text.match(/^\[BLOCKED\] (.+?): (.+)$/);
         if (blockedMatch) {
           const idMatch = text.match(/am-(\d+)/);
-          if (idMatch) trackBlocker(parseInt(idMatch[1], 10), blockedMatch[1], blockedMatch[2]);
+          const blockerId = idMatch ? parseInt(idMatch[1], 10) : null;
+          if (blockerId) trackBlocker(blockerId, blockedMatch[1], blockedMatch[2]);
+          sendToBlockers(text).then((slackTs) => {
+            if (slackTs && blockerId) setBlockerSlackTs(blockerId, slackTs);
+          });
+        } else if (/\[(?:UNBLOCKED|RESOLVED)\]/i.test(text)) {
+          // Resolve tracked blockers and delete from #blockers
+          const resolvedIdMatch = text.match(/am-(\d+)/);
+          if (resolvedIdMatch) {
+            const resolved = resolveBlocker(parseInt(resolvedIdMatch[1], 10));
+            if (resolved?.slack_ts) {
+              deleteFromBlockers(resolved.slack_ts).then(() =>
+                clearResolvedBlocker(resolved.agent_mail_id),
+              );
+            }
+          }
+        } else if (/\b(BLOCKED|ESCALAT|urgent|blocker)\b/i.test(text)) {
+          // Urgent messages without structured [BLOCKED] format
+          sendToBlockers(text);
         }
       },
       onActivity: (sender, ts, subject) => recordAgentActivity(sender, ts, subject),
@@ -666,6 +748,9 @@ async function main(): Promise<void> {
       imapPass: MAIL_IMAP_PASS,
       targetChatJid: MAIL_TARGET_JID,
       onMessage: (_chatJid, msg) => storeMessage(msg),
+      onEmail: (email) => sendToEmails(
+        `${email.from} <${email.fromAddress}>`, email.to, email.subject, email.body,
+      ),
       pollIntervalMs: MAIL_POLL_INTERVAL,
       onDown: () => postAlert('Email (IMAP) is unreachable. Inbound email processing is offline.'),
       onRecovered: () => postAlert('Email (IMAP) connection restored.'),
@@ -768,6 +853,7 @@ async function main(): Promise<void> {
         const newLevel = blocker.escalation_level + 1;
         const age = Math.round((Date.now() - new Date(blocker.first_posted).getTime()) / 60_000);
         const msg = `Reminder (L${newLevel}): [BLOCKED] from ${blocker.sender} — "${blocker.subject}" — unresolved for ${age} min`;
+        sendToBlockers(msg);
         sendToAlerts(msg);
 
         // At L2+, also email PA's own inbox for out-of-band visibility

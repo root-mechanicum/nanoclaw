@@ -14,6 +14,8 @@ const envConfig = readEnvFile([
   'SLACK_ONLY',
   'SLACK_BRIEFING_CHANNEL',
   'SLACK_ALERTS_CHANNEL',
+  'SLACK_BLOCKERS_CHANNEL',
+  'SLACK_EMAILS_CHANNEL',
   'TAILSCALE_IP',
   'WEBHOOK_PORT',
   'HEALTHCHECK_PING_URL',
@@ -107,6 +109,10 @@ export const SLACK_BRIEFING_CHANNEL =
   process.env.SLACK_BRIEFING_CHANNEL || envConfig.SLACK_BRIEFING_CHANNEL || '';
 export const SLACK_ALERTS_CHANNEL =
   process.env.SLACK_ALERTS_CHANNEL || envConfig.SLACK_ALERTS_CHANNEL || '';
+export const SLACK_BLOCKERS_CHANNEL =
+  process.env.SLACK_BLOCKERS_CHANNEL || envConfig.SLACK_BLOCKERS_CHANNEL || '';
+export const SLACK_EMAILS_CHANNEL =
+  process.env.SLACK_EMAILS_CHANNEL || envConfig.SLACK_EMAILS_CHANNEL || '';
 
 // Health endpoint / webhook server
 export const TAILSCALE_IP =

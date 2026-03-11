@@ -30,6 +30,7 @@ export interface EmailPollerOpts {
   imapPass: string;
   targetChatJid: string;
   onMessage: (chatJid: string, msg: NewMessage) => void;
+  onEmail?: (email: CachedEmail) => void;
   pollIntervalMs: number;
   onDown?: () => void;
   onRecovered?: () => void;
@@ -189,7 +190,7 @@ export class EmailPoller {
             this.opts.onMessage(this.opts.targetChatJid, newMsg);
 
             // Cache for MCP tools
-            this.emailCache.push({
+            const cachedEmail: CachedEmail = {
               uid,
               from: senderName,
               fromAddress: senderAddress,
@@ -197,7 +198,13 @@ export class EmailPoller {
               subject,
               date: envelope.date?.toISOString() || new Date().toISOString(),
               body,
-            });
+            };
+            this.emailCache.push(cachedEmail);
+
+            // Fire structured email callback (e.g. for Slack #emails mirror)
+            if (this.opts.onEmail) {
+              try { this.opts.onEmail(cachedEmail); } catch { /* non-fatal */ }
+            }
             if (this.emailCache.length > MAX_CACHED_EMAILS) {
               this.emailCache = this.emailCache.slice(-MAX_CACHED_EMAILS);
             }
