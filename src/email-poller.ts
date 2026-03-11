@@ -156,9 +156,10 @@ export class EmailPoller {
 
         for (const uid of toFetch) {
           try {
+            // Fetch envelope + body: try MIME part '1' (text/plain), fall back to 'TEXT' (full body)
             const msg = await client.fetchOne(String(uid), {
               envelope: true,
-              bodyParts: ['TEXT'],
+              bodyParts: ['1', 'TEXT'],
             }, { uid: true });
 
             if (!msg) continue;
@@ -172,9 +173,23 @@ export class EmailPoller {
             const toAddr = envelope.to?.[0]?.address || 'unknown';
             const subject = envelope.subject || '(no subject)';
 
-            // Extract body text from bodyParts
+            // Extract body text — prefer MIME part 1 (text/plain), fall back to TEXT
+            const part1 = msg.bodyParts?.get('1');
             const textPart = msg.bodyParts?.get('TEXT');
-            const body = textPart ? textPart.toString('utf-8').slice(0, BODY_MAX_LENGTH) : '';
+            const bodyBuf = part1 || textPart;
+            let body = bodyBuf ? bodyBuf.toString('utf-8').slice(0, BODY_MAX_LENGTH) : '';
+            // Strip MIME headers if TEXT was returned (raw body includes headers)
+            if (!part1 && body) {
+              const headerEnd = body.indexOf('\r\n\r\n');
+              if (headerEnd !== -1 && headerEnd < 2000) {
+                body = body.slice(headerEnd + 4);
+              }
+            }
+            if (body) {
+              logger.info({ uid, bodyLen: body.length, usedPart: part1 ? '1' : 'TEXT' }, 'Email: body extracted');
+            } else {
+              logger.warn({ uid, subject, hasParts: !!msg.bodyParts, partKeys: msg.bodyParts ? [...msg.bodyParts.keys()] : [] }, 'Email: no body extracted');
+            }
 
             const newMsg: NewMessage = {
               id: `email-${uid}`,
