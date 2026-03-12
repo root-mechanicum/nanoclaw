@@ -53,6 +53,7 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { runHostAgent } from './host-runner.js';
 import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
 import {
   createTask,
@@ -410,22 +411,31 @@ async function runAgent(
       }
     : undefined;
 
+  // Use host runner for PA (main group) when PA_HOST_MODE is enabled.
+  // Host mode gives PA direct access to bd, Agent Mail, and all host tools.
+  const useHostRunner = isMain && /^(1|true|yes)$/i.test((process.env.PA_HOST_MODE || '').trim());
+  if (useHostRunner) {
+    logger.info({ group: group.name }, 'Using host runner (PA_HOST_MODE=1)');
+  }
+
   try {
-    const output = await runContainerAgent(
-      group,
-      {
-        prompt,
-        sessionId,
-        groupFolder: group.folder,
-        chatJid,
-        isMain,
-        providerHint: executionProfile.providerHint,
-        modelHint: executionProfile.modelHint,
-        providerReason: executionProfile.reason,
-      },
-      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
-      wrappedOnOutput,
-    );
+    const runnerInput = {
+      prompt,
+      sessionId,
+      groupFolder: group.folder,
+      chatJid,
+      isMain,
+      providerHint: executionProfile.providerHint,
+      modelHint: executionProfile.modelHint,
+      providerReason: executionProfile.reason,
+    };
+
+    const onProcessRegistered = (proc: import('child_process').ChildProcess, name: string) =>
+      queue.registerProcess(chatJid, proc, name, group.folder);
+
+    const output = useHostRunner
+      ? await runHostAgent(group, runnerInput, onProcessRegistered, wrappedOnOutput)
+      : await runContainerAgent(group, runnerInput, onProcessRegistered, wrappedOnOutput);
 
     if (output.newSessionId && !paCheapNoResume) {
       sessions[group.folder] = output.newSessionId;
