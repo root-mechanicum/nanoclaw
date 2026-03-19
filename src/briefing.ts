@@ -54,7 +54,19 @@ export interface BriefingData {
     assignee: string;
     priority: number;
   }>;
+  pendingDecisions: Array<{
+    id: string;
+    title: string;
+    assignee: string;
+    priority: number;
+    description: string;
+  }>;
   recentCommits: string[];
+  humanStatus: {
+    status: string;
+    since: string;
+    returnNote: string;
+  } | null;
   generatedAt: string;
 }
 
@@ -179,9 +191,44 @@ export function collectBriefingData(
       priority: b.priority ?? 3,
     }));
 
+  // Pending decisions (beads waiting for human input)
+  const allOpen = runBd('list --status open') as Array<{
+    id: string;
+    title: string;
+    assignee?: string;
+    priority?: number;
+    labels?: string[];
+    description?: string;
+  }>;
+  const pendingDecisions = allOpen
+    .filter((b) => (b.labels || []).includes('dispatch:waiting-human'))
+    .sort((a, b) => (a.priority ?? 3) - (b.priority ?? 3))
+    .slice(0, 10)
+    .map((b) => ({
+      id: b.id,
+      title: b.title,
+      assignee: b.assignee || 'unassigned',
+      priority: b.priority ?? 3,
+      description: (b.description || '').slice(0, 200),
+    }));
+
   // Recent commits
   const commitHours = type === 'morning' ? 12 : 8;
   const recentCommits = getRecentCommits(commitHours);
+
+  // Human status
+  let humanStatus: BriefingData['humanStatus'] = null;
+  try {
+    const raw = fs.readFileSync('/srv/gluon/.human-status', 'utf-8');
+    const parsed = JSON.parse(raw);
+    humanStatus = {
+      status: parsed.status || 'unknown',
+      since: parsed.since || '',
+      returnNote: parsed.return_note || '',
+    };
+  } catch {
+    // file missing or unparseable
+  }
 
   return {
     type,
@@ -191,7 +238,9 @@ export function collectBriefingData(
     recentlyClosedBeads,
     inProgressBeads,
     readyBeads,
+    pendingDecisions,
     recentCommits,
+    humanStatus,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -252,6 +301,16 @@ export function formatBriefingPrompt(data: BriefingData, briefingChannelId?: str
     }
   }
 
+  // Pending decisions (needs human input)
+  if (data.pendingDecisions.length > 0) {
+    sections.push('\n## ⚠️ Decisions Needed');
+    for (const d of data.pendingDecisions) {
+      sections.push(`- **${d.id}** (P${d.priority}): ${d.title}`);
+      if (d.description) sections.push(`  _${d.description}_`);
+    }
+    sections.push('  _Reply with bead ID + decision to approve/adjust._');
+  }
+
   // Recent commits
   if (data.recentCommits.length > 0) {
     const label = isMorning ? 'Commits (last 12h)' : 'Commits (today)';
@@ -269,6 +328,15 @@ export function formatBriefingPrompt(data: BriefingData, briefingChannelId?: str
     sections.push('\n## Silent Agents (>6h)');
     for (const a of data.silentAgents) {
       sections.push(`- ${a.name} (last: ${a.lastSeen}${a.lastSubject ? `, re: ${a.lastSubject}` : ''})`);
+    }
+  }
+
+  // Human status
+  if (data.humanStatus) {
+    const icon = data.humanStatus.status === 'available' ? '🟢' : '🔴';
+    sections.push(`\n## Human Status: ${icon} ${data.humanStatus.status}`);
+    if (data.humanStatus.returnNote) {
+      sections.push(`  _${data.humanStatus.returnNote}_`);
     }
   }
 

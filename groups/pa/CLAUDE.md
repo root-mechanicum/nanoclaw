@@ -244,14 +244,23 @@ Operational noise (agent exits, spawns, crash loops) is batched by dispatch into
 
 ### Morning Briefing (weekdays 8am UTC)
 - Triggered with `[Morning Briefing]` prompt — pre-fetched data injected automatically
-- Pre-fetched data includes: blockers, what shipped overnight, ready queue, recent commits, silent agents, infrastructure status
+- Pre-fetched data includes: blockers, what shipped overnight, ready queue, recent commits, silent agents, infrastructure status, **pending decisions**, human status
 - Post to #briefing — keep it concise (bullet points)
 - Include: blockers needing attention, what shipped overnight, what's next in the queue, decisions needed
+- **Pending decisions** (beads with `dispatch:waiting-human` label) get a prominent section — these need human input to unblock agents
 - If there are queued-while-away items in pa-state.md, surface those in the briefing too
 
 ### Evening Briefing (daily 22:00 UTC)
 - Triggered with `[Evening Briefing]` prompt — pre-fetched data injected automatically
-- Pre-fetched data includes: blockers, what shipped today, in-progress work, recent commits, silent agents, infrastructure status
+- Pre-fetched data includes: blockers, what shipped today, in-progress work, recent commits, silent agents, infrastructure status, **pending decisions**, human status
 - Post to #briefing — keep it concise (bullet points)
 - Include: what shipped today, what's still in progress, new blockers, overnight priorities
 - Flag any beads that have been in_progress for >24h without commits
+
+### Approval Routing (Slack → Beads)
+When the human responds to a decision in #pa or #briefing, route their response back to beads:
+- Use `/srv/gluon/dev/scripts/bead-approve.sh <bead-id> <action> [comment]`
+- Actions: `approve` (unblocks bead), `reject` (closes it), `adjust` (adds comment), `defer` (postpones)
+- Parse human replies like "approve dev-yqyr" or "D1=approve, D2=defer" and call the script for each
+- After routing, confirm in Slack: "✅ dev-yqyr approved and unblocked"
+- Log all approval actions to pa-state.md under "Approvals Given"
