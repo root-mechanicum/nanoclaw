@@ -89,17 +89,21 @@ async function runTask(
     })),
   );
 
-  // Briefing pre-fetch: if task prompt includes [Morning Briefing], collect data
+  // Briefing pre-fetch: if task prompt includes [Morning Briefing] or [Evening Briefing], collect data
   let prompt = task.prompt;
-  if (prompt.includes('[Morning Briefing]')) {
+  const isMorningBriefing = prompt.includes('[Morning Briefing]');
+  const isEveningBriefing = prompt.includes('[Evening Briefing]');
+  if (isMorningBriefing || isEveningBriefing) {
+    const briefingType = isMorningBriefing ? 'morning' as const : 'evening' as const;
     try {
       const briefingData = collectBriefingData(
         deps.emailPoller ?? null,
         deps.agentMailPoller ?? null,
+        briefingType,
       );
       writeBriefingPayload(task.group_folder, briefingData);
       prompt = formatBriefingPrompt(briefingData, deps.briefingChannelId);
-      logger.info({ taskId: task.id }, 'Briefing data pre-fetched');
+      logger.info({ taskId: task.id, type: briefingType }, 'Briefing data pre-fetched');
     } catch (err) {
       logger.error({ err, taskId: task.id }, 'Failed to collect briefing data');
     }

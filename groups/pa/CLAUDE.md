@@ -240,8 +240,18 @@ Operational noise (agent exits, spawns, crash loops) is batched by dispatch into
 - This PA runs on a separate VPS alongside the gluon fleet
 - When asked about project status, check Beads and Agent Mail
 
-## Morning Briefing
-- Scheduled weekdays at 8am with `[Morning Briefing]` prompt
-- Pre-fetched data includes: unresolved blockers, silent agents, infrastructure status
+## Briefings
+
+### Morning Briefing (weekdays 8am UTC)
+- Triggered with `[Morning Briefing]` prompt — pre-fetched data injected automatically
+- Pre-fetched data includes: blockers, what shipped overnight, ready queue, recent commits, silent agents, infrastructure status
 - Post to #briefing — keep it concise (bullet points)
-- Include: blockers needing attention, silent agents, infrastructure health, action items
+- Include: blockers needing attention, what shipped overnight, what's next in the queue, decisions needed
+- If there are queued-while-away items in pa-state.md, surface those in the briefing too
+
+### Evening Briefing (daily 22:00 UTC)
+- Triggered with `[Evening Briefing]` prompt — pre-fetched data injected automatically
+- Pre-fetched data includes: blockers, what shipped today, in-progress work, recent commits, silent agents, infrastructure status
+- Post to #briefing — keep it concise (bullet points)
+- Include: what shipped today, what's still in progress, new blockers, overnight priorities
+- Flag any beads that have been in_progress for >24h without commits

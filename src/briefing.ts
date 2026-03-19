@@ -1,7 +1,11 @@
 /**
- * Morning Briefing — collects data from pollers + DB and writes
- * a payload for the PA container to format and post to #briefing.
+ * Briefings — collects data from pollers, beads, and DB, then formats
+ * structured prompts for PA to post to #briefing.
+ *
+ * Morning briefing: overnight summary, blockers, decisions needed.
+ * Evening briefing: what shipped today, what's in progress, overnight priorities.
  */
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -13,7 +17,10 @@ import { logger } from './logger.js';
 import type { AgentMailPoller } from './agent-mail-poller.js';
 import type { EmailPoller } from './email-poller.js';
 
+export type BriefingType = 'morning' | 'evening';
+
 export interface BriefingData {
+  type: BriefingType;
   unresolvedBlockers: Array<{
     sender: string;
     subject: string;
@@ -29,12 +36,69 @@ export interface BriefingData {
     agentMail: { status: string; lastPollTs: string | null } | null;
     email: { status: string; lastPollTs: string | null } | null;
   };
+  recentlyClosedBeads: Array<{
+    id: string;
+    title: string;
+    closedAt: string;
+    closeReason: string;
+  }>;
+  inProgressBeads: Array<{
+    id: string;
+    title: string;
+    assignee: string;
+    priority: number;
+  }>;
+  readyBeads: Array<{
+    id: string;
+    title: string;
+    assignee: string;
+    priority: number;
+  }>;
+  recentCommits: string[];
   generatedAt: string;
+}
+
+/**
+ * Run bd CLI and parse JSON output. Returns empty array on failure.
+ */
+function runBd(args: string): unknown[] {
+  try {
+    const output = execSync(`/usr/local/bin/bd ${args} --json`, {
+      timeout: 10_000,
+      encoding: 'utf-8',
+      cwd: '/srv/gluon/dev',
+      env: { ...process.env, HOME: '/home/ubuntu' },
+    });
+    return JSON.parse(output.trim());
+  } catch (err) {
+    logger.warn({ err, args }, 'Briefing: failed to run bd');
+    return [];
+  }
+}
+
+/**
+ * Get recent git commits (last 12h for morning, last 8h for evening).
+ */
+function getRecentCommits(hours: number): string[] {
+  try {
+    const output = execSync(
+      `git log --oneline --since="${hours} hours ago" --no-merges 2>/dev/null | head -20`,
+      {
+        timeout: 5_000,
+        encoding: 'utf-8',
+        cwd: '/srv/gluon/dev',
+      },
+    );
+    return output.trim().split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 export function collectBriefingData(
   emailPoller: EmailPoller | null,
   agentMailPoller: AgentMailPoller | null,
+  type: BriefingType = 'morning',
 ): BriefingData {
   const now = Date.now();
 
@@ -61,10 +125,73 @@ export function collectBriefingData(
     email: emailPoller?.getStatus() ?? null,
   };
 
+  // Beads: recently closed (last 24h for morning, last 12h for evening)
+  const closedHours = type === 'morning' ? 24 : 12;
+  const cutoff = new Date(now - closedHours * 60 * 60 * 1000).toISOString();
+  const allClosed = runBd('list --status closed') as Array<{
+    id: string;
+    title: string;
+    closed_at?: string;
+    close_reason?: string;
+  }>;
+  const recentlyClosedBeads = allClosed
+    .filter((b) => b.closed_at && b.closed_at > cutoff)
+    .sort((a, b) => (b.closed_at || '').localeCompare(a.closed_at || ''))
+    .slice(0, 15)
+    .map((b) => ({
+      id: b.id,
+      title: b.title,
+      closedAt: b.closed_at || '',
+      closeReason: (b.close_reason || '').slice(0, 120),
+    }));
+
+  // Beads: in progress
+  const inProgressBeads = (
+    runBd('list --status in_progress') as Array<{
+      id: string;
+      title: string;
+      assignee?: string;
+      priority?: number;
+    }>
+  )
+    .slice(0, 15)
+    .map((b) => ({
+      id: b.id,
+      title: b.title,
+      assignee: b.assignee || 'unassigned',
+      priority: b.priority ?? 3,
+    }));
+
+  // Beads: ready (dispatch queue)
+  const readyBeads = (
+    runBd('ready') as Array<{
+      id: string;
+      title: string;
+      assignee?: string;
+      priority?: number;
+    }>
+  )
+    .slice(0, 10)
+    .map((b) => ({
+      id: b.id,
+      title: b.title,
+      assignee: b.assignee || 'unassigned',
+      priority: b.priority ?? 3,
+    }));
+
+  // Recent commits
+  const commitHours = type === 'morning' ? 12 : 8;
+  const recentCommits = getRecentCommits(commitHours);
+
   return {
+    type,
     unresolvedBlockers,
     silentAgents,
     pollerStatuses,
+    recentlyClosedBeads,
+    inProgressBeads,
+    readyBeads,
+    recentCommits,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -73,18 +200,20 @@ export function writeBriefingPayload(groupFolder: string, data: BriefingData): s
   const inputDir = path.join(DATA_DIR, 'ipc', groupFolder, 'input');
   fs.mkdirSync(inputDir, { recursive: true });
 
-  const filename = `briefing-${Date.now()}.json`;
+  const filename = `briefing-${data.type}-${Date.now()}.json`;
   const filepath = path.join(inputDir, filename);
   fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
 
-  logger.info({ filepath }, 'Briefing payload written');
+  logger.info({ filepath, type: data.type }, 'Briefing payload written');
   return filepath;
 }
 
 export function formatBriefingPrompt(data: BriefingData, briefingChannelId?: string): string {
   const sections: string[] = [];
 
-  sections.push('[Morning Briefing]');
+  const isMorning = data.type === 'morning';
+  const tag = isMorning ? '[Morning Briefing]' : '[Evening Briefing]';
+  sections.push(tag);
   sections.push(`Generated: ${data.generatedAt}`);
 
   // Blockers
@@ -95,6 +224,44 @@ export function formatBriefingPrompt(data: BriefingData, briefingChannelId?: str
     }
   } else {
     sections.push('\n## Blockers\nNone.');
+  }
+
+  // What shipped
+  if (data.recentlyClosedBeads.length > 0) {
+    const label = isMorning ? 'Shipped Overnight' : 'Shipped Today';
+    sections.push(`\n## ${label}`);
+    for (const b of data.recentlyClosedBeads) {
+      sections.push(`- **${b.id}**: ${b.title}`);
+      if (b.closeReason) sections.push(`  _${b.closeReason}_`);
+    }
+  }
+
+  // In progress
+  if (data.inProgressBeads.length > 0) {
+    sections.push('\n## In Progress');
+    for (const b of data.inProgressBeads) {
+      sections.push(`- **${b.id}** (P${b.priority}, ${b.assignee}): ${b.title}`);
+    }
+  }
+
+  // Ready queue (morning only — so human can adjust priorities)
+  if (isMorning && data.readyBeads.length > 0) {
+    sections.push('\n## Ready Queue (next up)');
+    for (const b of data.readyBeads.slice(0, 8)) {
+      sections.push(`- **${b.id}** (P${b.priority}, ${b.assignee}): ${b.title}`);
+    }
+  }
+
+  // Recent commits
+  if (data.recentCommits.length > 0) {
+    const label = isMorning ? 'Commits (last 12h)' : 'Commits (today)';
+    sections.push(`\n## ${label}`);
+    for (const c of data.recentCommits.slice(0, 10)) {
+      sections.push(`- \`${c}\``);
+    }
+    if (data.recentCommits.length > 10) {
+      sections.push(`- ... and ${data.recentCommits.length - 10} more`);
+    }
   }
 
   // Silent agents
@@ -112,11 +279,17 @@ export function formatBriefingPrompt(data: BriefingData, briefingChannelId?: str
   const em = data.pollerStatuses.email;
   sections.push(`- Email (IMAP): ${em ? em.status : 'not configured'}`);
 
+  // Instructions for PA
   sections.push('\n---');
   const target = briefingChannelId
-    ? `Post the briefing to channel ID "${briefingChannelId}" (not the current channel) using the send_message tool with chat_jid "sl:${briefingChannelId}".`
-    : 'Post the briefing to #briefing using the send_message tool.';
-  sections.push(`${target} Include: blockers requiring attention, silent agents, infrastructure status, and any action items. Keep it short — bullet points, no fluff.`);
+    ? `Post the briefing to channel ID "${briefingChannelId}" (not the current channel) using the Slack MCP send_message tool.`
+    : 'Post the briefing to #briefing using the Slack MCP send_message tool.';
+
+  if (isMorning) {
+    sections.push(`${target} Format as a concise morning summary. Highlight: blockers needing attention, what shipped overnight, what's next in the queue, and any decisions needed. Keep it short — bullet points, no fluff. If there are queued-while-away items in pa-state.md, surface those too.`);
+  } else {
+    sections.push(`${target} Format as a concise end-of-day summary. Highlight: what shipped today, what's still in progress, any new blockers, and overnight priorities. Keep it short — bullet points, no fluff.`);
+  }
 
   return sections.join('\n');
 }

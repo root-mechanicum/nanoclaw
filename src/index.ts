@@ -1001,6 +1001,36 @@ async function main(): Promise<void> {
         logger.info({ taskId }, 'Auto-registered morning briefing task');
       }
     }
+
+    // Auto-register evening briefing task
+    const hasEvening = tasks.some((t) => t.prompt.includes('[Evening Briefing]') && t.status === 'active');
+    if (!hasEvening) {
+      const paJidEvening = Object.entries(registeredGroups).find(
+        ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+      )?.[0];
+      if (paJidEvening) {
+        const taskId = `evening-briefing-${Date.now()}`;
+        createTask({
+          id: taskId,
+          group_folder: MAIN_GROUP_FOLDER,
+          chat_jid: paJidEvening,
+          prompt: '[Evening Briefing] Collect end-of-day status and post an evening briefing to #briefing.',
+          schedule_type: 'cron',
+          schedule_value: '0 22 * * 0-6',
+          context_mode: 'isolated',
+          next_run: null,
+          status: 'active',
+          created_at: new Date().toISOString(),
+        });
+        const { CronExpressionParser } = await import('cron-parser');
+        const { TIMEZONE } = await import('./config.js');
+        try {
+          const interval = CronExpressionParser.parse('0 22 * * 0-6', { tz: TIMEZONE });
+          updateTask(taskId, { next_run: interval.next().toISOString() });
+        } catch { /* ignore */ }
+        logger.info({ taskId }, 'Auto-registered evening briefing task');
+      }
+    }
   }
 
   startMessageLoop().catch((err) => {
