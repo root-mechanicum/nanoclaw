@@ -6,6 +6,18 @@
       "env": {
         "GITHUB_TOKEN": "${GITHUB_TOKEN}"
       }
+    },
+    "gluon-api": {
+      "command": "bun",
+      "args": ["run", "/srv/gluon/dev/tools/gluon-api-mcp/src/index.ts"],
+      "env": {
+        "GLUON_API_TOKEN": "${GLUON_API_TOKEN}",
+        "GLUON_API_URL": "https://gluon.me/api"
+      }
+    },
+    "beads": {
+      "command": "bun",
+      "args": ["run", "/srv/gluon/dev/tools/beads-mcp/src/index.ts"]
     }
   }
 }

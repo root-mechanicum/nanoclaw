@@ -3,17 +3,23 @@
  *
  * Tracks [BLOCKED] messages from Agent Mail and escalates reminders
  * at increasing intervals if they remain unresolved.
+ * Stores Slack message timestamps so resolved blockers can be deleted from #blockers.
  */
 import { getDb } from './db.js';
 import { logger } from './logger.js';
 
-interface StaleBlocker {
+export interface StaleBlocker {
   agent_mail_id: number;
   sender: string;
   subject: string;
   first_posted: string;
   last_escalated: string;
   escalation_level: number;
+}
+
+export interface ResolvedBlocker {
+  agent_mail_id: number;
+  slack_ts: string;
 }
 
 // Escalation thresholds (minutes since first_posted)
@@ -32,9 +38,35 @@ export function trackBlocker(id: number, sender: string, subject: string): void 
   `).run(id, sender, subject, now, now);
 }
 
-export function resolveBlocker(id: number): void {
+export function setBlockerSlackTs(id: number, slackTs: string): void {
   const db = getDb();
+  db.prepare(`UPDATE blocker_escalation SET slack_ts = ? WHERE agent_mail_id = ?`).run(slackTs, id);
+}
+
+export function resolveBlocker(id: number): ResolvedBlocker | null {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT agent_mail_id, slack_ts FROM blocker_escalation WHERE agent_mail_id = ? AND resolved = 0`
+  ).get(id) as { agent_mail_id: number; slack_ts: string | null } | undefined;
+
   db.prepare(`UPDATE blocker_escalation SET resolved = 1 WHERE agent_mail_id = ?`).run(id);
+
+  if (row?.slack_ts) {
+    return { agent_mail_id: row.agent_mail_id, slack_ts: row.slack_ts };
+  }
+  return null;
+}
+
+export function getUnresolvedSlackTs(): ResolvedBlocker[] {
+  const db = getDb();
+  return db.prepare(
+    `SELECT agent_mail_id, slack_ts FROM blocker_escalation WHERE resolved = 1 AND slack_ts IS NOT NULL`
+  ).all() as ResolvedBlocker[];
+}
+
+export function clearResolvedBlocker(id: number): void {
+  const db = getDb();
+  db.prepare(`UPDATE blocker_escalation SET slack_ts = NULL WHERE agent_mail_id = ?`).run(id);
 }
 
 export function getStaleBlockers(): StaleBlocker[] {

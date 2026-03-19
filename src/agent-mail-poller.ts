@@ -63,6 +63,31 @@ interface RateWindow {
 const RATE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 const RATE_LIMIT = 3; // max messages per sender per window
 
+// Noise squelching: batch operational messages instead of injecting each one
+// Patterns that indicate operational noise (spawn/exit/crash notifications)
+const NOISE_PATTERNS = [
+  /^\[AGENT-EXIT\]/i,
+  /^\[AGENT-SPAWN\]/i,
+  /crashed.*exit/i,
+  /respawn/i,
+  /exited.*code/i,
+  /spawn.*loop/i,
+];
+
+const NOISE_DIGEST_INTERVAL_MS = 10 * 60 * 1000; // Digest every 10 min
+
+interface NoiseEntry {
+  from: string;
+  subject: string;
+  body: string;
+  ts: string;
+}
+
+function isNoiseMessage(subject: string, body: string | undefined): boolean {
+  const text = `${subject} ${body || ''}`;
+  return NOISE_PATTERNS.some(p => p.test(text));
+}
+
 export class AgentMailPoller {
   private opts: AgentMailPollerOpts;
   private interval: ReturnType<typeof setInterval> | null = null;
@@ -73,6 +98,8 @@ export class AgentMailPoller {
   private lastPollTs: string | null = null;
   private rpcId = 0;
   private alertRateMap = new Map<string, RateWindow>();
+  private noiseBuffer: NoiseEntry[] = [];
+  private noiseDigestTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: AgentMailPollerOpts) {
     this.opts = opts;
@@ -115,6 +142,11 @@ export class AgentMailPoller {
       });
     }, this.opts.pollIntervalMs);
 
+    // Start noise digest timer
+    this.noiseDigestTimer = setInterval(() => {
+      this.flushNoiseDigest();
+    }, NOISE_DIGEST_INTERVAL_MS);
+
     // First poll immediately
     this.poll().catch((err) => {
       logger.error({ err }, 'Agent Mail: initial poll error');
@@ -131,6 +163,12 @@ export class AgentMailPoller {
       clearInterval(this.interval);
       this.interval = null;
     }
+    if (this.noiseDigestTimer) {
+      clearInterval(this.noiseDigestTimer);
+      this.noiseDigestTimer = null;
+    }
+    // Flush any remaining noise on shutdown
+    this.flushNoiseDigest();
     logger.info('Agent Mail poller stopped');
   }
 
@@ -175,6 +213,28 @@ export class AgentMailPoller {
       }
 
       for (const msg of messages) {
+        // Noise squelching: buffer operational noise instead of injecting immediately
+        if (isNoiseMessage(msg.subject, msg.body_md)) {
+          this.noiseBuffer.push({
+            from: msg.from,
+            subject: msg.subject,
+            body: msg.body_md || '',
+            ts: msg.created_ts,
+          });
+          logger.debug(
+            { from: msg.from, subject: msg.subject, buffered: this.noiseBuffer.length },
+            'Agent Mail: noise message buffered for digest',
+          );
+
+          // Still track activity and advance cursor, just don't inject
+          this.opts.onActivity?.(msg.from, msg.created_ts, msg.subject);
+          this.markAndAck(msg);
+          if (msg.created_ts > this.sinceTs) {
+            this.sinceTs = msg.created_ts;
+          }
+          continue;
+        }
+
         // Convert to NewMessage and inject into the PA group
         const newMsg: NewMessage = {
           id: `am-${msg.id}`,
@@ -195,31 +255,8 @@ export class AgentMailPoller {
         // Route [BLOCKED]/[ERROR] messages to #alerts (rate-limited)
         this.maybeAlert(msg);
 
-        // Mark as read
-        this.rpc('tools/call', {
-          name: 'mark_message_read',
-          arguments: {
-            project_key: this.opts.projectKey,
-            agent_name: this.opts.agentName,
-            message_id: msg.id,
-          },
-        }).catch((err) =>
-          logger.warn({ err, messageId: msg.id }, 'Agent Mail: failed to mark message read'),
-        );
-
-        // Acknowledge if required
-        if (msg.ack_required) {
-          this.rpc('tools/call', {
-            name: 'acknowledge_message',
-            arguments: {
-              project_key: this.opts.projectKey,
-              agent_name: this.opts.agentName,
-              message_id: msg.id,
-            },
-          }).catch((err) =>
-            logger.warn({ err, messageId: msg.id }, 'Agent Mail: failed to acknowledge message'),
-          );
-        }
+        // Mark as read + ack
+        this.markAndAck(msg);
 
         // Advance cursor
         if (msg.created_ts > this.sinceTs) {
@@ -252,6 +289,92 @@ export class AgentMailPoller {
         );
       }
     }
+  }
+
+  /**
+   * Mark a message as read and acknowledge if required.
+   */
+  private markAndAck(msg: InboxMessage): void {
+    this.rpc('tools/call', {
+      name: 'mark_message_read',
+      arguments: {
+        project_key: this.opts.projectKey,
+        agent_name: this.opts.agentName,
+        message_id: msg.id,
+      },
+    }).catch((err) =>
+      logger.warn({ err, messageId: msg.id }, 'Agent Mail: failed to mark message read'),
+    );
+
+    if (msg.ack_required) {
+      this.rpc('tools/call', {
+        name: 'acknowledge_message',
+        arguments: {
+          project_key: this.opts.projectKey,
+          agent_name: this.opts.agentName,
+          message_id: msg.id,
+        },
+      }).catch((err) =>
+        logger.warn({ err, messageId: msg.id }, 'Agent Mail: failed to acknowledge message'),
+      );
+    }
+  }
+
+  /**
+   * Flush buffered noise messages as a single digest message.
+   * Groups by agent and provides a summary instead of individual messages.
+   */
+  private flushNoiseDigest(): void {
+    if (this.noiseBuffer.length === 0) return;
+
+    const entries = this.noiseBuffer.splice(0);
+
+    // Group by agent
+    const byAgent = new Map<string, NoiseEntry[]>();
+    for (const entry of entries) {
+      const list = byAgent.get(entry.from) || [];
+      list.push(entry);
+      byAgent.set(entry.from, list);
+    }
+
+    // Build digest
+    const lines: string[] = [`[Ops Digest] ${entries.length} operational events in the last ${NOISE_DIGEST_INTERVAL_MS / 60_000} min:`];
+    for (const [agent, agentEntries] of byAgent) {
+      if (agentEntries.length === 1) {
+        lines.push(`• ${agent}: ${agentEntries[0].subject}`);
+      } else {
+        // Deduplicate similar subjects
+        const subjectCounts = new Map<string, number>();
+        for (const e of agentEntries) {
+          // Normalize: strip agent names and IDs for grouping
+          const normalized = e.subject.replace(/\b\w+Agent\b/g, '*').replace(/\b[a-f0-9-]{8,}\b/g, '*');
+          subjectCounts.set(normalized, (subjectCounts.get(normalized) || 0) + 1);
+        }
+        const summaries = [...subjectCounts.entries()].map(([subj, count]) =>
+          count > 1 ? `${subj} (×${count})` : subj
+        );
+        lines.push(`• ${agent}: ${summaries.join(', ')}`);
+      }
+    }
+
+    const digestContent = lines.join('\n');
+
+    const newMsg: NewMessage = {
+      id: `am-digest-${Date.now()}`,
+      chat_jid: this.opts.targetChatJid,
+      sender: 'am:system',
+      sender_name: 'Dispatch (digest)',
+      content: digestContent,
+      timestamp: new Date().toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    };
+
+    this.opts.onMessage(this.opts.targetChatJid, newMsg);
+    logger.info(
+      { count: entries.length, agents: [...byAgent.keys()] },
+      'Agent Mail: flushed noise digest',
+    );
   }
 
   /**
