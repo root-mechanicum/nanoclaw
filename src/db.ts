@@ -91,7 +91,8 @@ function createSchema(database: Database.Database): void {
       first_posted TEXT NOT NULL,
       last_escalated TEXT NOT NULL,
       escalation_level INTEGER DEFAULT 0,
-      resolved INTEGER DEFAULT 0
+      resolved INTEGER DEFAULT 0,
+      slack_ts TEXT
     );
 
     CREATE TABLE IF NOT EXISTS agent_liveness (
@@ -101,6 +102,15 @@ function createSchema(database: Database.Database): void {
       last_subject TEXT
     );
   `);
+
+  // Add slack_ts column to blocker_escalation if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE blocker_escalation ADD COLUMN slack_ts TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
@@ -139,6 +149,29 @@ function createSchema(database: Database.Database): void {
     database.exec(`UPDATE chats SET channel = 'telegram', is_group = 1 WHERE jid LIKE 'tg:%'`);
   } catch {
     /* columns already exist */
+  }
+
+  // Add agent_name and host_mode columns to registered_groups (multi-group host mode support)
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN agent_name TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN host_mode INTEGER DEFAULT 0`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN host_cwd TEXT`,
+    );
+  } catch {
+    /* column already exists */
   }
 }
 
@@ -546,6 +579,9 @@ export function getRegisteredGroup(
         added_at: string;
         container_config: string | null;
         requires_trigger: number | null;
+        agent_name: string | null;
+        host_mode: number | null;
+        host_cwd: string | null;
       }
     | undefined;
   if (!row) return undefined;
@@ -559,6 +595,9 @@ export function getRegisteredGroup(
       ? JSON.parse(row.container_config)
       : undefined,
     requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+    agentName: row.agent_name || undefined,
+    hostMode: row.host_mode === 1,
+    hostCwd: row.host_cwd || undefined,
   };
 }
 
@@ -567,8 +606,8 @@ export function setRegisteredGroup(
   group: RegisteredGroup,
 ): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, agent_name, host_mode, host_cwd)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -577,6 +616,9 @@ export function setRegisteredGroup(
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
+    group.agentName || null,
+    group.hostMode ? 1 : 0,
+    group.hostCwd || null,
   );
 }
 
@@ -591,6 +633,9 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     added_at: string;
     container_config: string | null;
     requires_trigger: number | null;
+    agent_name: string | null;
+    host_mode: number | null;
+    host_cwd: string | null;
   }>;
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -603,6 +648,9 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
         ? JSON.parse(row.container_config)
         : undefined,
       requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+      agentName: row.agent_name || undefined,
+      hostMode: row.host_mode === 1,
+      hostCwd: row.host_cwd || undefined,
     };
   }
   return result;

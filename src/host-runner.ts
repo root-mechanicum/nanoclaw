@@ -25,8 +25,8 @@ import { RegisteredGroup } from './types.js';
 import type { ContainerInput, ContainerOutput } from './container-runner.js';
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || '/home/ubuntu/.local/bin/claude';
-// Working directory for host agent — the main project repo
-const HOST_CWD = process.env.HOST_AGENT_CWD || '/srv/gluon/dev';
+// Default working directory for host agents — the main project repo
+const DEFAULT_HOST_CWD = process.env.HOST_AGENT_CWD || '/srv/gluon/dev';
 
 /**
  * Parsed line from `claude -p --output-format stream-json --verbose`
@@ -78,13 +78,20 @@ export async function runHostAgent(
     args.push('--model', input.modelHint);
   }
 
-  // Load PA identity from group CLAUDE.md via --append-system-prompt
-  const groupClaudeMd = path.join(groupDir, 'CLAUDE.md');
-  if (fs.existsSync(groupClaudeMd)) {
-    const identity = fs.readFileSync(groupClaudeMd, 'utf-8');
-    args.push('--append-system-prompt', identity);
+  // Load agent definition — uses the same skill/MCP loading as dispatched agents.
+  // Falls back to --append-system-prompt from group CLAUDE.md if no agent config.
+  const agentName = group.agentName || null;
+  if (agentName) {
+    args.push('--agent', agentName);
     // Also add the group dir so PA can read/write pa-state.md etc.
     args.push('--add-dir', groupDir);
+  } else {
+    const groupClaudeMd = path.join(groupDir, 'CLAUDE.md');
+    if (fs.existsSync(groupClaudeMd)) {
+      const identity = fs.readFileSync(groupClaudeMd, 'utf-8');
+      args.push('--append-system-prompt', identity);
+      args.push('--add-dir', groupDir);
+    }
   }
 
   // Prompt is piped via stdin (not args) to avoid shell escaping issues
@@ -100,13 +107,16 @@ export async function runHostAgent(
   // Unset CLAUDECODE to avoid nesting detection
   delete env.CLAUDECODE;
 
+  // Per-group CWD support — groups can override the default working directory
+  const cwd = group.hostCwd || DEFAULT_HOST_CWD;
+
   logger.info(
     {
       group: group.name,
       processName,
       sessionId: input.sessionId || 'new',
       model: input.modelHint,
-      cwd: HOST_CWD,
+      cwd,
     },
     'Spawning host agent',
   );
@@ -114,7 +124,7 @@ export async function runHostAgent(
   return new Promise((resolve) => {
     const proc = spawn(CLAUDE_BIN, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: HOST_CWD,
+      cwd,
       env,
     });
 

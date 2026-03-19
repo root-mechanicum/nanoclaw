@@ -39,6 +39,9 @@ export interface RegisteredGroup {
   added_at: string;
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
+  agentName?: string; // Claude Code --agent name (e.g. 'pa-agent'). Uses skill loading instead of --append-system-prompt.
+  hostMode?: boolean; // Run as host process (like PA) instead of container. Gives direct access to bd, Agent Mail, etc.
+  hostCwd?: string; // Working directory for host mode (default: HOST_AGENT_CWD or /srv/gluon/dev)
 }
 
 export interface NewMessage {

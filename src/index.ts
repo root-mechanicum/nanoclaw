@@ -165,6 +165,62 @@ function loadState(): void {
   }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
+
+  // Apply agent name to main group — enables --agent mode (skill loading) instead of --append-system-prompt.
+  const paAgentName = process.env.PA_AGENT_NAME || '';
+  if (paAgentName) {
+    for (const [jid, group] of Object.entries(registeredGroups)) {
+      if (group.folder === MAIN_GROUP_FOLDER) {
+        group.agentName = paAgentName;
+        logger.info({ jid, agentName: paAgentName }, 'PA agent name set');
+      }
+    }
+  }
+
+  // Register additional host-mode groups from HOST_GROUPS env var.
+  // Format: JSON array of {jid, name, folder, agentName?, hostCwd?}
+  // Example: HOST_GROUPS='[{"jid":"sl:C123","name":"#meta","folder":"meta","agentName":"meta-agent"}]'
+  const hostGroupsEnv = process.env.HOST_GROUPS || '';
+  if (hostGroupsEnv) {
+    try {
+      const hostGroups = JSON.parse(hostGroupsEnv) as Array<{
+        jid: string;
+        name: string;
+        folder: string;
+        agentName?: string;
+        hostCwd?: string;
+        requiresTrigger?: boolean;
+      }>;
+      for (const hg of hostGroups) {
+        if (!registeredGroups[hg.jid]) {
+          const group: RegisteredGroup = {
+            name: hg.name,
+            folder: hg.folder,
+            trigger: `@${ASSISTANT_NAME}`,
+            added_at: new Date().toISOString(),
+            requiresTrigger: hg.requiresTrigger ?? false,
+            agentName: hg.agentName,
+            hostMode: true,
+            hostCwd: hg.hostCwd,
+          };
+          registerGroup(hg.jid, group);
+          logger.info({ jid: hg.jid, folder: hg.folder, agentName: hg.agentName }, 'Host group registered from HOST_GROUPS env');
+        } else {
+          // Update existing group with host mode settings
+          const existing = registeredGroups[hg.jid];
+          existing.hostMode = true;
+          if (hg.agentName) existing.agentName = hg.agentName;
+          if (hg.hostCwd) existing.hostCwd = hg.hostCwd;
+          if (hg.requiresTrigger !== undefined) existing.requiresTrigger = hg.requiresTrigger;
+          setRegisteredGroup(hg.jid, existing);
+          logger.info({ jid: hg.jid, folder: hg.folder }, 'Host group updated from HOST_GROUPS env');
+        }
+      }
+    } catch (err) {
+      logger.error({ err, raw: hostGroupsEnv }, 'Failed to parse HOST_GROUPS env var');
+    }
+  }
+
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
@@ -411,11 +467,13 @@ async function runAgent(
       }
     : undefined;
 
-  // Use host runner for PA (main group) when PA_HOST_MODE is enabled.
-  // Host mode gives PA direct access to bd, Agent Mail, and all host tools.
-  const useHostRunner = isMain && /^(1|true|yes)$/i.test((process.env.PA_HOST_MODE || '').trim());
+  // Use host runner when: (a) PA main group with PA_HOST_MODE=1, or (b) group.hostMode is true.
+  // Host mode gives agents direct access to bd, Agent Mail, and all host tools.
+  const useHostRunner =
+    (isMain && /^(1|true|yes)$/i.test((process.env.PA_HOST_MODE || '').trim())) ||
+    !!group.hostMode;
   if (useHostRunner) {
-    logger.info({ group: group.name }, 'Using host runner (PA_HOST_MODE=1)');
+    logger.info({ group: group.name, hostMode: group.hostMode, isMain }, 'Using host runner');
   }
 
   try {

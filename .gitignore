@@ -20,6 +20,9 @@ groups/global/*
 !groups/pa/
 groups/pa/*
 !groups/pa/CLAUDE.md
+!groups/meta/
+groups/meta/*
+!groups/meta/CLAUDE.md
 
 # Secrets
 *.keys.json
