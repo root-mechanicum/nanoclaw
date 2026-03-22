@@ -19,6 +19,20 @@ import type { EmailPoller } from './email-poller.js';
 
 export type BriefingType = 'morning' | 'evening';
 
+export interface CassDigest {
+  period_hours: number;
+  agent_sessions: number;
+  outcomes: {
+    total: number;
+    success: number;
+    failure: number;
+    avg_duration_sec: number;
+    unique_agents: number;
+    success_rate: number;
+  };
+  error?: string;
+}
+
 export interface BriefingData {
   type: BriefingType;
   unresolvedBlockers: Array<{
@@ -67,6 +81,7 @@ export interface BriefingData {
     since: string;
     returnNote: string;
   } | null;
+  cassDigest: CassDigest | null;
   generatedAt: string;
 }
 
@@ -85,6 +100,29 @@ function runBd(args: string): unknown[] {
   } catch (err) {
     logger.warn({ err, args }, 'Briefing: failed to run bd');
     return [];
+  }
+}
+
+/**
+ * Get CASS activity digest for the briefing period.
+ */
+function getCassDigest(hours: number): CassDigest | null {
+  try {
+    const scriptPath = path.join(__dirname, '..', 'scripts', 'cass-pa-digest.sh');
+    const output = execSync(`bash ${scriptPath} ${hours}`, {
+      timeout: 15_000,
+      encoding: 'utf-8',
+      env: { ...process.env, HOME: '/home/ubuntu' },
+    });
+    const parsed = JSON.parse(output.trim());
+    if (parsed.error) {
+      logger.warn({ error: parsed.error }, 'Briefing: CASS digest returned error');
+      return null;
+    }
+    return parsed as CassDigest;
+  } catch (err) {
+    logger.warn({ err }, 'Briefing: failed to get CASS digest');
+    return null;
   }
 }
 
@@ -216,6 +254,9 @@ export function collectBriefingData(
   const commitHours = type === 'morning' ? 12 : 8;
   const recentCommits = getRecentCommits(commitHours);
 
+  // CASS digest — same period as closed beads
+  const cassDigest = getCassDigest(closedHours);
+
   // Human status
   let humanStatus: BriefingData['humanStatus'] = null;
   try {
@@ -241,6 +282,7 @@ export function collectBriefingData(
     pendingDecisions,
     recentCommits,
     humanStatus,
+    cassDigest,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -338,6 +380,21 @@ export function formatBriefingPrompt(data: BriefingData, briefingChannelId?: str
     if (data.humanStatus.returnNote) {
       sections.push(`  _${data.humanStatus.returnNote}_`);
     }
+  }
+
+  // CASS activity digest
+  if (data.cassDigest && data.cassDigest.agent_sessions > 0) {
+    sections.push('\n## Agent Activity (CASS)');
+    const cd = data.cassDigest;
+    sections.push(`- ${cd.agent_sessions} agent sessions in last ${cd.period_hours}h`);
+    if (cd.outcomes.total > 0) {
+      sections.push(`- Outcomes: ${cd.outcomes.success}/${cd.outcomes.total} succeeded (${cd.outcomes.success_rate}%)`);
+      if (cd.outcomes.failure > 0) {
+        sections.push(`- ⚠️ ${cd.outcomes.failure} failures — check for patterns`);
+      }
+      sections.push(`- Avg session duration: ${Math.round(cd.outcomes.avg_duration_sec / 60)}min`);
+    }
+    sections.push(`_Use \`cass search "<query>"\` to investigate patterns._`);
   }
 
   // Infrastructure

@@ -234,6 +234,37 @@ Operational noise (agent exits, spawns, crash loops) is batched by dispatch into
 - If an agent has crashed 5+ times, flag it in #alerts once (not per-crash)
 - Update "Known Agent Status" in pa-state.md
 
+## Past Interactions (CASS)
+
+You have access to **CASS** — a search engine over all past agent conversations (3000+ sessions, 190k+ messages). Use it to learn from precedents instead of treating every event as novel.
+
+### When to use CASS
+- **Novel email**: Before triaging an unfamiliar email type, search for how similar emails were handled: `cass search "email from <domain or topic>" --limit 5 --json`
+- **Recurring failures**: When an agent fails or a service goes down, check if it happened before: `cass search "pass-cli corrupt" --limit 3 --json`
+- **Decision precedents**: Before surfacing a decision, check if a similar one was already decided: `cass search "approve deploy" --limit 5 --json`
+- **Pattern recognition**: When you notice a recurring pattern, search for prior instances to confirm frequency
+
+### CASS commands
+```bash
+# Search for past conversations matching a query
+cass search "query" --limit 5 --json
+
+# Activity timeline (recent sessions)
+cass timeline --since 1d --json
+
+# Token/cost analytics
+cass analytics tokens --days 7 --json
+
+# Find sessions related to a specific file
+cass context /srv/gluon/dev/path/to/file --json
+```
+
+### Using CASS results
+- Results include `snippet`, `source_path`, and `score` — higher score = better match
+- Use `cass expand <source_path> --line <N>` to see full conversation context around a match
+- Don't cite CASS results directly to the user — synthesize insights: "This has happened 3 times before, last resolution was X"
+- If CASS shows a pattern of repeated issues, flag it as a potential bead
+
 ## Context
 - Klaas runs a multi-agent coding setup (gluon) on Hetzner VPSes via Tailscale
 - Agents coordinate via Agent Mail, track work via Beads (`bd` CLI)
