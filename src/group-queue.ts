@@ -57,6 +57,15 @@ export class GroupQueue {
     this.processMessagesFn = fn;
   }
 
+  /**
+   * Get the current retry count for a group.
+   * Used by processGroupMessages to decide whether to skip cursor rollback
+   * when retries are about to be exhausted.
+   */
+  getRetryCount(groupJid: string): number {
+    return this.getGroup(groupJid).retryCount;
+  }
+
   enqueueMessageCheck(groupJid: string): void {
     if (this.shuttingDown) return;
 

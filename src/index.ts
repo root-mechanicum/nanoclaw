@@ -289,9 +289,28 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-  const missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+  let missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
 
   if (missedMessages.length === 0) return true;
+
+  // Cap message batch size to prevent prompt overflow that crashes the host agent.
+  // When messages pile up (e.g. after a service restart with stale cursor), sending
+  // hundreds of messages as a single prompt causes claude -p to exit immediately.
+  // Keep the most recent messages and advance the cursor past skipped ones.
+  const MAX_MESSAGE_BATCH = 50;
+  if (missedMessages.length > MAX_MESSAGE_BATCH) {
+    const skipped = missedMessages.length - MAX_MESSAGE_BATCH;
+    logger.warn(
+      { group: group.name, total: missedMessages.length, skipped, kept: MAX_MESSAGE_BATCH },
+      'Message backlog exceeds batch limit, skipping older messages',
+    );
+    // Advance cursor past skipped messages so they won't be retried
+    const skippedMessages = missedMessages.slice(0, skipped);
+    lastAgentTimestamp[chatJid] = skippedMessages[skippedMessages.length - 1].timestamp;
+    saveState();
+    // Only process the most recent messages
+    missedMessages = missedMessages.slice(skipped);
+  }
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
@@ -406,6 +425,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       logger.warn({ group: group.name }, 'Agent error after output was sent, skipping cursor rollback to prevent duplicates');
       return true;
     }
+    // Check if retries are about to be exhausted — if so, DON'T roll back
+    // the cursor. This prevents a poisoned message batch (e.g. 950+ messages)
+    // from being retried indefinitely across service restarts.
+    const retryCount = queue.getRetryCount(chatJid);
+    if (retryCount >= 4) { // MAX_RETRIES is 5, this is the last attempt
+      logger.error(
+        { group: group.name, retryCount },
+        'Retries nearly exhausted, advancing cursor to prevent infinite retry loop',
+      );
+      // Cursor stays advanced — these messages are dropped
+      return false;
+    }
+
     // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
