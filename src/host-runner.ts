@@ -154,6 +154,7 @@ export async function runHostAgent(
     let newSessionId: string | undefined;
     let timedOut = false;
     let hadOutput = false;
+    let lastStreamError: string | undefined;
     let outputChain = Promise.resolve();
 
     // Parse streaming JSON lines from stdout
@@ -207,11 +208,23 @@ export async function runHostAgent(
           const sessionId = msg.session_id || newSessionId;
           if (sessionId) newSessionId = sessionId;
 
+          // Build error string from result text and/or errors array
+          const errorParts: string[] = [];
+          if (msg.result) errorParts.push(msg.result);
+          if (Array.isArray(msg.errors)) {
+            for (const e of msg.errors) {
+              if (typeof e === 'string' && e) errorParts.push(e);
+            }
+          }
+          const errorText = errorParts.join('; ') || 'Unknown error';
+
+          if (msg.is_error) lastStreamError = errorText;
+
           const output: ContainerOutput = {
             status: msg.is_error ? 'error' : 'success',
             result: msg.result || null,
             newSessionId: sessionId,
-            error: msg.is_error ? (msg.result || 'Unknown error') : undefined,
+            error: msg.is_error ? errorText : undefined,
           };
 
           if (onOutput) {
@@ -319,7 +332,7 @@ export async function runHostAgent(
             status: 'error',
             result: null,
             newSessionId,
-            error: `Host agent exited with code ${code}: ${stderr.slice(-200)}`,
+            error: `Host agent exited with code ${code}: ${lastStreamError || stderr.slice(-200)}`,
           });
         });
         return;

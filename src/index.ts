@@ -512,10 +512,19 @@ async function runAgent(
         output.result?.includes('OAuth token has expired') ||
         output.error?.includes('OAuth token has expired'));
 
-    if ((aupPoisoned || authPoisoned) && output.newSessionId) {
+    // Detect stale session — claude -p --resume fails when session expired or was
+    // cleaned up (e.g. after RuntimeMaxSec restart). Without this, each retry gets
+    // a new session_id from the error response, saves it, and the next retry also
+    // fails → infinite retry loop burning 1000+ attempts/day.
+    const sessionNotFound =
+      (output.result?.includes('No conversation found with session ID') ||
+        output.error?.includes('No conversation found with session ID'));
+
+    if ((aupPoisoned || authPoisoned || sessionNotFound) && output.newSessionId) {
+      const reason = aupPoisoned ? 'aup' : authPoisoned ? 'auth' : 'session-not-found';
       logger.warn(
-        { group: group.name, sessionId: output.newSessionId, reason: aupPoisoned ? 'aup' : 'auth' },
-        `${aupPoisoned ? 'AUP refusal' : 'Auth failure'} detected, clearing poisoned session`,
+        { group: group.name, sessionId: output.newSessionId, reason },
+        `${reason === 'aup' ? 'AUP refusal' : reason === 'auth' ? 'Auth failure' : 'Stale session'} detected, clearing poisoned session`,
       );
       delete sessions[group.folder];
       deleteSession(group.folder);
