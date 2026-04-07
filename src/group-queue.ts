@@ -24,6 +24,8 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  /** When set, all spawns are suppressed until this epoch-ms timestamp. */
+  rateLimitUntil: number;
 }
 
 export class GroupQueue {
@@ -47,6 +49,7 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        rateLimitUntil: 0,
       };
       this.groups.set(groupJid, state);
     }
@@ -66,10 +69,47 @@ export class GroupQueue {
     return this.getGroup(groupJid).retryCount;
   }
 
+  /**
+   * Set a rate-limit cooldown for a group. All spawns are suppressed until
+   * the cooldown expires. Messages that arrive during cooldown are queued
+   * and drained automatically when the cooldown lifts.
+   */
+  setRateLimitCooldown(groupJid: string, untilMs: number): void {
+    const state = this.getGroup(groupJid);
+    state.rateLimitUntil = untilMs;
+    state.retryCount = 0; // Don't also run the normal retry loop
+    const remainSec = Math.round((untilMs - Date.now()) / 1000);
+    logger.warn(
+      { groupJid, cooldownSec: remainSec, until: new Date(untilMs).toISOString() },
+      'Rate-limit cooldown activated — suppressing spawns',
+    );
+    // Schedule a drain when the cooldown expires
+    setTimeout(() => {
+      if (this.shuttingDown) return;
+      const s = this.getGroup(groupJid);
+      if (s.rateLimitUntil <= Date.now()) {
+        s.rateLimitUntil = 0;
+        logger.info({ groupJid }, 'Rate-limit cooldown expired, draining queued work');
+        this.drainGroup(groupJid);
+      }
+    }, Math.max(untilMs - Date.now() + 1000, 1000)); // +1s buffer
+  }
+
   enqueueMessageCheck(groupJid: string): void {
     if (this.shuttingDown) return;
 
     const state = this.getGroup(groupJid);
+
+    // Rate-limit cooldown: queue messages but don't spawn
+    if (state.rateLimitUntil > Date.now()) {
+      state.pendingMessages = true;
+      const remainSec = Math.round((state.rateLimitUntil - Date.now()) / 1000);
+      logger.debug(
+        { groupJid, cooldownRemainSec: remainSec },
+        'Rate-limited, message queued (cooldown active)',
+      );
+      return;
+    }
 
     if (state.active) {
       state.pendingMessages = true;
@@ -203,6 +243,13 @@ export class GroupQueue {
     reason: 'messages' | 'drain',
   ): Promise<void> {
     const state = this.getGroup(groupJid);
+
+    // Rate-limit guard: don't start a container during cooldown
+    if (state.rateLimitUntil > Date.now()) {
+      state.pendingMessages = true;
+      return;
+    }
+
     state.active = true;
     state.idleWaiting = false;
     state.isTaskContainer = false;

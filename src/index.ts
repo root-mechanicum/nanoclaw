@@ -552,6 +552,50 @@ async function runAgent(
       (output.result?.includes('No conversation found with session ID') ||
         output.error?.includes('No conversation found with session ID'));
 
+    // Detect rate limit — "You've hit your limit · resets 3pm (UTC)"
+    // Without this, each retry spawns a new claude process that immediately
+    // hits the same limit, creating a crash-loop of 50+ spawns/hour.
+    const rateLimitHit =
+      (output.error?.includes('hit your limit') ||
+        output.result?.includes('hit your limit'));
+
+    if (rateLimitHit) {
+      // Parse reset time from error message, e.g. "resets 3pm (UTC)"
+      const resetMatch = (output.error || output.result || '').match(
+        /resets\s+(\d{1,2})(am|pm)\s*\(UTC\)/i,
+      );
+      let cooldownMs: number;
+      if (resetMatch) {
+        let hour = parseInt(resetMatch[1], 10);
+        if (resetMatch[2].toLowerCase() === 'pm' && hour < 12) hour += 12;
+        if (resetMatch[2].toLowerCase() === 'am' && hour === 12) hour = 0;
+        const now = new Date();
+        const resetTime = new Date(now);
+        resetTime.setUTCHours(hour, 5, 0, 0); // +5min buffer past reset
+        if (resetTime.getTime() <= now.getTime()) {
+          // Reset time is tomorrow
+          resetTime.setUTCDate(resetTime.getUTCDate() + 1);
+        }
+        cooldownMs = resetTime.getTime() - now.getTime();
+        // Cap at 24 hours, floor at 30 minutes
+        cooldownMs = Math.min(cooldownMs, 24 * 60 * 60 * 1000);
+        cooldownMs = Math.max(cooldownMs, 30 * 60 * 1000);
+      } else {
+        // Couldn't parse reset time — default 30 minute cooldown
+        cooldownMs = 30 * 60 * 1000;
+      }
+
+      logger.warn(
+        { group: group.name, cooldownMin: Math.round(cooldownMs / 60000) },
+        'Rate limit detected, entering cooldown',
+      );
+      queue.setRateLimitCooldown(chatJid, Date.now() + cooldownMs);
+
+      // Clear the session so next attempt after cooldown starts fresh
+      delete sessions[group.folder];
+      deleteSession(group.folder);
+    }
+
     if ((aupPoisoned || authPoisoned || sessionNotFound) && output.newSessionId) {
       const reason = aupPoisoned ? 'aup' : authPoisoned ? 'auth' : 'session-not-found';
       logger.warn(
