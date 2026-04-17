@@ -1118,6 +1118,53 @@ async function main(): Promise<void> {
     }
   }
 
+  // Auto-register escalated-bead sweep task for the PA group.
+  // Structural fence for dev-0v7j5: OrangeFox's activation is otherwise
+  // bounded by inbound signals (Slack, email, dispatch pokes). If none
+  // arrive for a window, open pa-agent decision gates sit and strand the
+  // downstream desire pipeline. This interval task wakes OrangeFox on a
+  // fixed cadence (default 15 min, override with PA_SWEEP_INTERVAL_MS) to
+  // sweep its own bead inbox. Runs regardless of SLACK_BRIEFING_CHANNEL.
+  {
+    const existingTasks = getAllTasks();
+    const hasSweep = existingTasks.some(
+      (t) => t.prompt.includes('[Escalated Sweep]') && t.status === 'active',
+    );
+    if (!hasSweep) {
+      const paJidSweep = Object.entries(registeredGroups).find(
+        ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+      )?.[0];
+      if (paJidSweep) {
+        const defaultSweepIntervalMs = 15 * 60 * 1000;
+        const configured = parseInt(process.env.PA_SWEEP_INTERVAL_MS || '', 10);
+        const intervalMs =
+          Number.isFinite(configured) && configured >= 60_000
+            ? configured
+            : defaultSweepIntervalMs;
+        const sweepTaskId = `escalated-sweep-${Date.now()}`;
+        createTask({
+          id: sweepTaskId,
+          group_folder: MAIN_GROUP_FOLDER,
+          chat_jid: paJidSweep,
+          prompt:
+            '[Escalated Sweep] Check your pa-agent bead inbox and process decision gates. Run:\n' +
+            '  bd list --assignee pa-agent --status open --json\n' +
+            'For each open bead whose title starts with "Agree:" or "Approve:" and carries the `escalated` label, follow the pa-agent skill: fetch evidence KVs referenced in the description, build a DECISION-TEMPLATE payload, and post it to Slack #pa. Bundle all pending decisions into a single message (D1, D2, …). If there is nothing to process, exit immediately without posting.',
+          schedule_type: 'interval',
+          schedule_value: String(intervalMs),
+          context_mode: 'isolated',
+          next_run: new Date(Date.now() + intervalMs).toISOString(),
+          status: 'active',
+          created_at: new Date().toISOString(),
+        });
+        logger.info(
+          { taskId: sweepTaskId, intervalMs },
+          'Auto-registered escalated-bead sweep task',
+        );
+      }
+    }
+  }
+
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);
