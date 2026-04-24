@@ -11,6 +11,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { ContainerOutput, runContainerAgent, writeTasksSnapshot } from './container-runner.js';
+import { runHostAgent } from './host-runner.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -131,8 +132,21 @@ async function runTask(
     }, TASK_CLOSE_DELAY_MS);
   };
 
+  // Mirror the host-runner decision from index.ts:runAgent — PA main group with
+  // PA_HOST_MODE=1 (or group.hostMode) runs as a host process, not a container.
+  // Without this, host-only features (e.g. bd, Agent Mail) silently fail in
+  // scheduled tasks even though interactive PA uses the host runner. (dev-zwf7i)
+  const useHostRunner =
+    (isMain && /^(1|true|yes)$/i.test((process.env.PA_HOST_MODE || '').trim())) ||
+    !!group.hostMode;
+  if (useHostRunner) {
+    logger.info({ taskId: task.id, group: group.name, isMain }, 'Using host runner for scheduled task');
+  }
+
+  const runAgent = useHostRunner ? runHostAgent : runContainerAgent;
+
   try {
-    const output = await runContainerAgent(
+    const output = await runAgent(
       group,
       {
         prompt,
