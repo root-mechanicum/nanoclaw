@@ -8,6 +8,7 @@ dist/
 store/
 data/
 logs/
+backups/
 
 # Groups - only track base structure and specific CLAUDE.md files
 groups/*
@@ -24,9 +25,12 @@ groups/pa/*
 groups/meta/*
 !groups/meta/CLAUDE.md
 
-# Secrets
+# Secrets — never track env files except the committed example
+# Covers .env, .env.static, .env.secrets, .env.secrets.age, .env.tpl, and any future .env.* variant
 *.keys.json
 .env
+.env.*
+!.env.example
 
 # OS
 .DS_Store
@@ -39,4 +43,3 @@ groups/meta/*
 .nanoclaw/
 
 agents-sdk-docs
-.env.static
