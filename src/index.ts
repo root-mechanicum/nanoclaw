@@ -26,6 +26,7 @@ import {
   MAIL_SMTP_USER,
   MAIL_TARGET_JID,
   MAIN_GROUP_FOLDER,
+  PA_NOOP_MARKER,
   POLL_INTERVAL,
   SLACK_ALERTS_CHANNEL,
   SLACK_APP_TOKEN,
@@ -273,6 +274,30 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
 }
 
 /**
+ * dev-vbyy3: report whether the PA NO-OP marker was touched at or after the
+ * given cycle-start time. PA's exit protocol touches PA_NOOP_MARKER right
+ * before exit ONLY on a TRUE NO-OP cycle (nothing changed, no decision posted).
+ * When that happens we must NOT forward PA's final `claude -p` summary text to
+ * the channel — the marker is the contract that the cycle changed nothing, so
+ * the summary is pure surface-burn that buries real decision cards.
+ *
+ * We read the marker's mtime rather than deleting it: dispatch also reads the
+ * marker to suppress redundant re-wakes, so consuming it would break that.
+ * Comparing mtime >= cycleStartMs scopes the signal to THIS cycle — a marker
+ * left stale by a prior NO-OP (or a real-work cycle that never touches it) has
+ * an older mtime and does not suppress the current forward.
+ *
+ * @internal - exported for testing
+ */
+export function _paNoopMarkedSince(sinceMs: number, markerPath = PA_NOOP_MARKER): boolean {
+  try {
+    return fs.statSync(markerPath).mtimeMs >= sinceMs;
+  } catch {
+    return false; // no marker (or unreadable) → not a TRUE NO-OP
+  }
+}
+
+/**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
@@ -362,6 +387,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  // dev-vbyy3: capture cycle start so we can detect whether PA touched the
+  // NO-OP marker DURING this cycle (TRUE NO-OP) and suppress its final summary.
+  const cycleStartMs = Date.now();
 
   const executionProfile = chooseExecutionProfile(chatJid, missedMessages);
   logger.info(
@@ -399,8 +427,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+        // dev-vbyy3: on a TRUE NO-OP PA cycle (noop marker touched this cycle),
+        // suppress forwarding the final summary text to #pa. The marker is PA's
+        // contract that nothing changed; forwarding the "PA Cycle Complete"
+        // summary is surface-burn that buries genuine decision cards. Genuine
+        // decision cards are posted via the Slack MCP during the cycle, not via
+        // this final-result forward, so they are unaffected.
+        if (isMainGroup && _paNoopMarkedSince(cycleStartMs)) {
+          logger.info(
+            { group: group.name },
+            'PA TRUE NO-OP (noop marker touched this cycle) — suppressing final-result forward to channel',
+          );
+        } else {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();

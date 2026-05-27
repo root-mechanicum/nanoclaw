@@ -39,6 +39,7 @@ const envConfig = readEnvFile([
   'MAIL_TARGET_JID',
   'MAIL_POLL_INTERVAL',
   'MAIN_GROUP_FOLDER',
+  'PA_NOOP_MARKER',
 ]);
 
 export const ASSISTANT_NAME =
@@ -64,6 +65,17 @@ export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER =
   process.env.MAIN_GROUP_FOLDER || envConfig.MAIN_GROUP_FOLDER || 'main';
+
+// dev-vbyy3: filesystem marker the PA agent touches at the end of a TRUE NO-OP
+// cycle (see .claude/agents/pa-agent.md). Dispatch reads its mtime to suppress
+// redundant re-wakes; the runtime reads it to suppress forwarding PA's final
+// summary text to #pa on those cycles (otherwise every NO-OP heartbeat posts a
+// "PA Cycle Complete" summary and buries genuine decision cards). Must match
+// dispatch's marker path: filepath.Join(os.TempDir(), "dispatch-noop-"+BeadsAssignee).
+export const PA_NOOP_MARKER =
+  process.env.PA_NOOP_MARKER ||
+  envConfig.PA_NOOP_MARKER ||
+  '/tmp/dispatch-noop-pa-agent';
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
