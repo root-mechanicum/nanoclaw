@@ -298,6 +298,33 @@ export function _paNoopMarkedSince(sinceMs: number, markerPath = PA_NOOP_MARKER)
 }
 
 /**
+ * dev-1f82i: content-based fallback gate for the PA NO-OP flood (P1 dev-4ipl3).
+ *
+ * The marker-based gate (_paNoopMarkedSince) only fires when PA touches
+ * PA_NOOP_MARKER during the cycle. In practice PA's final-turn summary kept
+ * reaching #pa anyway (12 posts on 2026-06-14 alone, each body literally saying
+ * "exited silently / zero Slack posts") — the wake comes via the scheduled
+ * escalated-sweep task and/or PA never touches the marker, so the marker gate
+ * misses. This is a SECOND, mechanism-independent gate: if the final-turn
+ * summary text reads like NO-OP heartbeat narration, drop it regardless of the
+ * marker.
+ *
+ * Why this is safe to drop unconditionally: genuine decision bundles are posted
+ * via the Slack MCP DURING the cycle (decision-formatter / conversations_add_message),
+ * not through this final-result forward. A bundle's body also never matches these
+ * NO-OP phrases. So a body that matches is, by construction, pure surface-burn
+ * that buries real decision cards.
+ *
+ * @internal - exported for testing
+ */
+const PA_NOOP_NARRATION_RE =
+  /TRUE NO-?OP|Escalated sweep complete|Cycle complete|exited silently|silent exit|NO-?OP cycle/i;
+
+export function _isPaNoopNarration(text: string): boolean {
+  return PA_NOOP_NARRATION_RE.test(text);
+}
+
+/**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
@@ -427,16 +454,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        // dev-vbyy3: on a TRUE NO-OP PA cycle (noop marker touched this cycle),
-        // suppress forwarding the final summary text to #pa. The marker is PA's
-        // contract that nothing changed; forwarding the "PA Cycle Complete"
-        // summary is surface-burn that buries genuine decision cards. Genuine
-        // decision cards are posted via the Slack MCP during the cycle, not via
-        // this final-result forward, so they are unaffected.
-        if (isMainGroup && _paNoopMarkedSince(cycleStartMs)) {
+        // dev-vbyy3 + dev-1f82i: on a TRUE NO-OP PA cycle, suppress forwarding
+        // the final summary text to #pa. Two independent gates, OR'd so either
+        // catches the flood:
+        //   (1) marker gate (dev-vbyy3): PA touched PA_NOOP_MARKER this cycle.
+        //   (2) content gate (dev-1f82i): the summary body reads like NO-OP
+        //       heartbeat narration. Robust to the observed failure where PA
+        //       never touches the marker (wake via scheduled sweep) yet still
+        //       emits a "exited silently" summary that reaches #pa.
+        // Forwarding either is surface-burn that buries genuine decision cards.
+        // Genuine decision cards are posted via the Slack MCP during the cycle,
+        // not via this final-result forward, so they are unaffected.
+        if (isMainGroup && (_paNoopMarkedSince(cycleStartMs) || _isPaNoopNarration(text))) {
           logger.info(
-            { group: group.name },
-            'PA TRUE NO-OP (noop marker touched this cycle) — suppressing final-result forward to channel',
+            {
+              group: group.name,
+              markerGate: _paNoopMarkedSince(cycleStartMs),
+              contentGate: _isPaNoopNarration(text),
+            },
+            'PA TRUE NO-OP — suppressing final-result forward to channel',
           );
         } else {
           await channel.sendMessage(chatJid, text);

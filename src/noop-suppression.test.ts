@@ -4,7 +4,7 @@ import path from 'path';
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-import { _paNoopMarkedSince } from './index.js';
+import { _paNoopMarkedSince, _isPaNoopNarration } from './index.js';
 
 // dev-vbyy3: the runtime suppresses forwarding PA's final summary to #pa when
 // the NO-OP marker was touched DURING the current cycle. These tests pin the
@@ -60,4 +60,37 @@ describe('_paNoopMarkedSince', () => {
     expect(_paNoopMarkedSince(storedMtimeMs, markerPath)).toBe(true);
     expect(_paNoopMarkedSince(storedMtimeMs + 1, markerPath)).toBe(false);
   });
+});
+
+// dev-1f82i: content-based fallback gate. Drops PA's final-turn summary when it
+// reads like NO-OP heartbeat narration, even if PA never touched the marker
+// (the observed failure mode that kept flooding #pa).
+describe('_isPaNoopNarration', () => {
+  // Real flood-post bodies observed on #pa (2026-06-14, dev-4ipl3) must match.
+  const floodBodies = [
+    'Escalated sweep complete. TRUE NO-OP — exited silently, zero Slack posts.',
+    'PA Cycle complete. Nothing to surface.',
+    'TRUE NO-OP cycle: all gate KVs unchanged, silent exit.',
+    'Exited silently — no decisions to surface this cycle.',
+    'NO-OP cycle, nothing changed.',
+    'NOOP cycle — silent exit.',
+  ];
+  for (const body of floodBodies) {
+    it(`flags NO-OP narration: ${body.slice(0, 40)}…`, () => {
+      expect(_isPaNoopNarration(body)).toBe(true);
+    });
+  }
+
+  // Genuine, human-relevant posts must pass through (NOT match).
+  const realBodies = [
+    'DECISIONS NEEDED — 3 items: D1 scn-47, D2 scn-09, D3 metabolism auth.',
+    'Morning briefing: 4 beads closed overnight, staging green, 1 blocker.',
+    'Blocker surfaced: dev-p1vwd awaiting human gate on metabolism auth.',
+    'Deploy to prod succeeded — app.gluon.me/health is green.',
+  ];
+  for (const body of realBodies) {
+    it(`passes through genuine post: ${body.slice(0, 40)}…`, () => {
+      expect(_isPaNoopNarration(body)).toBe(false);
+    });
+  }
 });
