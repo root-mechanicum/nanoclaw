@@ -26,7 +26,6 @@ import {
   MAIL_SMTP_USER,
   MAIL_TARGET_JID,
   MAIN_GROUP_FOLDER,
-  PA_NOOP_MARKER,
   POLL_INTERVAL,
   SLACK_ALERTS_CHANNEL,
   SLACK_APP_TOKEN,
@@ -77,6 +76,11 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
 import { detectMagicCommand } from './magic-commands.js';
+import {
+  _isPaNoopNarration,
+  _paNoopMarkedSince,
+  shouldSuppressPaNoopForward,
+} from './noop-suppression.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -273,56 +277,12 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
   registeredGroups = groups;
 }
 
-/**
- * dev-vbyy3: report whether the PA NO-OP marker was touched at or after the
- * given cycle-start time. PA's exit protocol touches PA_NOOP_MARKER right
- * before exit ONLY on a TRUE NO-OP cycle (nothing changed, no decision posted).
- * When that happens we must NOT forward PA's final `claude -p` summary text to
- * the channel — the marker is the contract that the cycle changed nothing, so
- * the summary is pure surface-burn that buries real decision cards.
- *
- * We read the marker's mtime rather than deleting it: dispatch also reads the
- * marker to suppress redundant re-wakes, so consuming it would break that.
- * Comparing mtime >= cycleStartMs scopes the signal to THIS cycle — a marker
- * left stale by a prior NO-OP (or a real-work cycle that never touches it) has
- * an older mtime and does not suppress the current forward.
- *
- * @internal - exported for testing
- */
-export function _paNoopMarkedSince(sinceMs: number, markerPath = PA_NOOP_MARKER): boolean {
-  try {
-    return fs.statSync(markerPath).mtimeMs >= sinceMs;
-  } catch {
-    return false; // no marker (or unreadable) → not a TRUE NO-OP
-  }
-}
-
-/**
- * dev-1f82i: content-based fallback gate for the PA NO-OP flood (P1 dev-4ipl3).
- *
- * The marker-based gate (_paNoopMarkedSince) only fires when PA touches
- * PA_NOOP_MARKER during the cycle. In practice PA's final-turn summary kept
- * reaching #pa anyway (12 posts on 2026-06-14 alone, each body literally saying
- * "exited silently / zero Slack posts") — the wake comes via the scheduled
- * escalated-sweep task and/or PA never touches the marker, so the marker gate
- * misses. This is a SECOND, mechanism-independent gate: if the final-turn
- * summary text reads like NO-OP heartbeat narration, drop it regardless of the
- * marker.
- *
- * Why this is safe to drop unconditionally: genuine decision bundles are posted
- * via the Slack MCP DURING the cycle (decision-formatter / conversations_add_message),
- * not through this final-result forward. A bundle's body also never matches these
- * NO-OP phrases. So a body that matches is, by construction, pure surface-burn
- * that buries real decision cards.
- *
- * @internal - exported for testing
- */
-const PA_NOOP_NARRATION_RE =
-  /TRUE NO-?OP|Escalated sweep complete|Cycle complete|exited silently|silent exit|NO-?OP cycle/i;
-
-export function _isPaNoopNarration(text: string): boolean {
-  return PA_NOOP_NARRATION_RE.test(text);
-}
+// PA NO-OP flood suppression gates (_paNoopMarkedSince, _isPaNoopNarration,
+// shouldSuppressPaNoopForward) live in ./noop-suppression.ts so both the
+// interactive forward path (below) and the scheduled escalated-sweep path
+// (task-scheduler.ts) can share them. Re-exported here for the existing test
+// import (noop-suppression.test.ts) and any callers. dev-64rwo.
+export { _isPaNoopNarration, _paNoopMarkedSince } from './noop-suppression.js';
 
 /**
  * Process all pending messages for a group.
@@ -465,7 +425,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // Forwarding either is surface-burn that buries genuine decision cards.
         // Genuine decision cards are posted via the Slack MCP during the cycle,
         // not via this final-result forward, so they are unaffected.
-        if (isMainGroup && (_paNoopMarkedSince(cycleStartMs) || _isPaNoopNarration(text))) {
+        if (shouldSuppressPaNoopForward(isMainGroup, text, cycleStartMs)) {
           logger.info(
             {
               group: group.name,

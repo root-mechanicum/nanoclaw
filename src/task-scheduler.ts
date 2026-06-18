@@ -21,6 +21,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
+import { shouldSuppressPaNoopForward } from './noop-suppression.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 import { collectBriefingData, formatBriefingPrompt, writeBriefingPayload } from './briefing.js';
@@ -160,8 +161,24 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          // dev-64rwo: gate the PA NO-OP flood on THIS path too. The dev-1f82i
+          // fix only wired the suppression into the interactive forward
+          // (index.ts:processGroupMessages); the ~30min escalated-sweep flood
+          // travels through THIS scheduled-task forward, which was ungated — so
+          // it kept burying real decision cards in #pa for 4 more days. Genuine
+          // decision bundles are posted via the Slack MCP during the cycle, not
+          // through this final-result forward, so suppressing a NO-OP summary
+          // here never drops a real decision. startTime is this task's cycle
+          // start (for the marker-mtime check).
+          if (shouldSuppressPaNoopForward(isMain, streamedOutput.result, startTime)) {
+            logger.info(
+              { taskId: task.id, group: group.name },
+              'PA TRUE NO-OP — suppressing scheduled-task result forward to channel',
+            );
+          } else {
+            // Forward result to user (sendMessage handles formatting)
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {

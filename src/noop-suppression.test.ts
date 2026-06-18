@@ -4,7 +4,7 @@ import path from 'path';
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-import { _paNoopMarkedSince, _isPaNoopNarration } from './index.js';
+import { _paNoopMarkedSince, _isPaNoopNarration } from './noop-suppression.js';
 
 // dev-vbyy3: the runtime suppresses forwarding PA's final summary to #pa when
 // the NO-OP marker was touched DURING the current cycle. These tests pin the
@@ -74,6 +74,14 @@ describe('_isPaNoopNarration', () => {
     'Exited silently — no decisions to surface this cycle.',
     'NO-OP cycle, nothing changed.',
     'NOOP cycle — silent exit.',
+    // dev-64rwo: terser variants observed in the LIVE flood (2026-06-17/18)
+    // that travelled the ungated scheduled-task path. These must also match.
+    'No-op.',
+    'No decision gates to process exiting silently.',
+    'No decision gates to process. Exiting silently per protocol.',
+    'No actionable work this cycle.',
+    'No decision gates to process TRUE NO-OP. Exiting silently per protocol.',
+    'No actionable decision gates this cycle. TRUE NO-OP markers touched, exiting silent.',
   ];
   for (const body of floodBodies) {
     it(`flags NO-OP narration: ${body.slice(0, 40)}…`, () => {
