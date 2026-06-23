@@ -78,6 +78,7 @@ import { startIpcWatcher } from './ipc.js';
 import { detectMagicCommand } from './magic-commands.js';
 import {
   _isPaNoopNarration,
+  _isPaTransientError,
   _paNoopMarkedSince,
   shouldSuppressPaNoopForward,
 } from './noop-suppression.js';
@@ -431,8 +432,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               group: group.name,
               markerGate: _paNoopMarkedSince(cycleStartMs),
               contentGate: _isPaNoopNarration(text),
+              // dev-v0qm6: pure predicate (no cooldown side effect) — flags when
+              // the suppression was the transient-error gate, not a NO-OP.
+              errorGate: _isPaTransientError(text),
             },
-            'PA TRUE NO-OP — suppressing final-result forward to channel',
+            'PA flood gate — suppressing final-result forward to channel',
           );
         } else {
           await channel.sendMessage(chatJid, text);
