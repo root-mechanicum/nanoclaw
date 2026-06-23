@@ -19,6 +19,7 @@ import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import { refreshOAuthTokenIfNeeded } from './oauth-refresh.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -180,98 +181,7 @@ function buildVolumeMounts(
   return mounts;
 }
 
-// OAuth refresh constants
-const OAUTH_TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
-const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const OAUTH_SCOPE = 'user:profile user:inference user:sessions:claude_code user:mcp_servers';
-const OAUTH_REFRESH_THRESHOLD_MS = 60 * 60 * 1000; // Refresh if < 1 hour remaining
-
-interface CredentialsFile {
-  claudeAiOauth?: {
-    accessToken: string;
-    refreshToken: string;
-    expiresAt: string;
-    scopes?: string[];
-    subscriptionType?: string;
-    rateLimitTier?: string;
-  };
-}
-
-/**
- * Refresh the OAuth token if it's near expiry.
- * Writes new tokens back to the credentials file (refresh tokens are single-use).
- */
-async function refreshOAuthTokenIfNeeded(credPath: string): Promise<void> {
-  let creds: CredentialsFile;
-  try {
-    creds = JSON.parse(fs.readFileSync(credPath, 'utf-8'));
-  } catch {
-    return; // No credentials file — nothing to refresh
-  }
-
-  const oauth = creds.claudeAiOauth;
-  if (!oauth?.refreshToken || !oauth.expiresAt) return;
-
-  const expiresAt = new Date(oauth.expiresAt).getTime();
-  const now = Date.now();
-  const remaining = expiresAt - now;
-
-  if (remaining > OAUTH_REFRESH_THRESHOLD_MS) {
-    return; // Token is still fresh
-  }
-
-  logger.info(
-    { remainingMs: remaining, expiresAt: oauth.expiresAt },
-    'OAuth token near expiry, refreshing',
-  );
-
-  try {
-    const res = await fetch(OAUTH_TOKEN_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'claude-code/1.0',
-        'anthropic-beta': 'oauth-2025-04-20',
-      },
-      body: JSON.stringify({
-        grant_type: 'refresh_token',
-        refresh_token: oauth.refreshToken,
-        client_id: OAUTH_CLIENT_ID,
-        scope: OAUTH_SCOPE,
-      }),
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      logger.error(
-        { status: res.status, body },
-        'OAuth token refresh failed',
-      );
-      return;
-    }
-
-    const data = (await res.json()) as {
-      access_token: string;
-      refresh_token?: string;
-      expires_in: number;
-      scope?: string;
-    };
-
-    // Update credentials (refresh_token is single-use — must persist the new one)
-    oauth.accessToken = data.access_token;
-    oauth.refreshToken = data.refresh_token || oauth.refreshToken;
-    oauth.expiresAt = new Date(now + data.expires_in * 1000).toISOString();
-
-    fs.writeFileSync(credPath, JSON.stringify(creds, null, 2) + '\n');
-
-    logger.info(
-      { expiresAt: oauth.expiresAt },
-      'OAuth token refreshed successfully',
-    );
-  } catch (err) {
-    logger.error({ err }, 'OAuth token refresh request failed');
-  }
-}
+// OAuth refresh lives in ./oauth-refresh.ts (shared with host-runner, dev-d7ynt).
 
 /**
  * Read allowed secrets from .env for passing to the container via stdin.

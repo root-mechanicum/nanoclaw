@@ -19,6 +19,7 @@ import {
   IDLE_TIMEOUT,
 } from './config.js';
 import { logger } from './logger.js';
+import { getFreshOAuthToken } from './oauth-refresh.js';
 import { RegisteredGroup } from './types.js';
 
 // Re-use the same interfaces from container-runner
@@ -106,6 +107,33 @@ export async function runHostAgent(
   }
   // Unset CLAUDECODE to avoid nesting detection
   delete env.CLAUDECODE;
+
+  // dev-d7ynt: proactively refresh the shared Claude OAuth token BEFORE spawning
+  // and inject it into the child env. The host path (PA) previously delegated
+  // refresh to the headless `claude -p`, which could spawn against a near-dead
+  // token and lose a single-use-refresh-token rotation race, leaving the on-disk
+  // credentials in a 401 state that a headless process cannot self-heal (no
+  // interactive re-login). Centralizing refresh here — the same way the
+  // container path already does — keeps PA's token warm and authoritative.
+  // Skip if the operator pinned an explicit token/key (respect their override).
+  if (!env.CLAUDE_CODE_OAUTH_TOKEN && !env.ANTHROPIC_API_KEY) {
+    try {
+      const token = await getFreshOAuthToken();
+      if (token) {
+        env.CLAUDE_CODE_OAUTH_TOKEN = token;
+      } else {
+        logger.warn(
+          { group: group.name, processName },
+          'No usable OAuth token found pre-spawn; claude will fall back to its own credential resolution',
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { group: group.name, processName, err: (err as Error).message },
+        'Pre-spawn OAuth refresh failed; spawning with existing credentials',
+      );
+    }
+  }
 
   // Per-group CWD support — groups can override the default working directory
   const cwd = group.hostCwd || DEFAULT_HOST_CWD;
@@ -218,7 +246,22 @@ export async function runHostAgent(
           }
           const errorText = errorParts.join('; ') || 'Unknown error';
 
-          if (msg.is_error) lastStreamError = errorText;
+          if (msg.is_error) {
+            lastStreamError = errorText;
+            // dev-d7ynt: a 401/auth final-turn that survives the pre-spawn
+            // refresh means the *refresh token itself* is dead (revoked or
+            // expired) — only an interactive `claude` re-login on the host can
+            // recover it. Log a distinct, greppable tag so this residual case
+            // is diagnosable. The transient-error flood gate
+            // (noop-suppression.ts) forwards the first such 401 to #pa as the
+            // operator-facing signal.
+            if (/401|invalid authentication credentials|invalid_grant|unauthor/i.test(errorText)) {
+              logger.error(
+                { group: group.name, processName },
+                'Host agent auth failure (401) despite pre-spawn OAuth refresh — host credential store likely needs interactive `claude` re-login',
+              );
+            }
+          }
 
           const output: ContainerOutput = {
             status: msg.is_error ? 'error' : 'success',
