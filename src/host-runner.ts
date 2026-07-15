@@ -108,6 +108,18 @@ export async function runHostAgent(
   // Unset CLAUDECODE to avoid nesting detection
   delete env.CLAUDECODE;
 
+  // SHELL HYGIENE (dev-lnjiuh): force claude's Bash-tool snapshot to bash.
+  // nanoclaw inherits the host env, whose SHELL is the user login shell (zsh);
+  // claude then snapshots the interactive oh-my-zsh env and drags in the tmux
+  // plugin's `alias tmux=_zsh_tmux_plugin_run` WITHOUT its backing function, so
+  // every `tmux …` the PA runs in its Bash tool fails with
+  // `_zsh_tmux_plugin_run: command not found` (exit 127) — the same unattended
+  // shell-env defect that hits the dispatch fleet (179 leaks in the PA cohort,
+  // fleet-vs-root-trace-2026-07-15.md). CLAUDE_CODE_SHELL is claude's dedicated
+  // snapshot-shell override; bash carries no such alias and PATH is inherited,
+  // so bd/cass stay reachable.
+  env.CLAUDE_CODE_SHELL = '/bin/bash';
+
   // dev-d7ynt: proactively refresh the shared Claude OAuth token BEFORE spawning
   // and inject it into the child env. The host path (PA) previously delegated
   // refresh to the headless `claude -p`, which could spawn against a near-dead
