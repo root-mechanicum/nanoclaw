@@ -16,8 +16,12 @@ You have full host access to the Gluon development environment:
 
 ### Work Queue (bd)
 - `bd ready --json` — what's waiting to be done
-- `bd list --status in_progress --json` — what's in flight
-- `bd list --status closed --json` — what recently shipped
+- `bd list --status in_progress --json --limit 0` — what's in flight
+- `bd list --status closed --json --limit 0` — what recently shipped
+
+  `--limit 0` is load-bearing: `bd list` caps at 50 rows silently — no error,
+  no warning, no exit code. Without it, "what recently shipped" is 50 of
+  several thousand closed beads and reads as the complete set.
 - `bd show <id> --json` — details on a specific bead
 - `bd update <id> --status <status>` — change bead status
 - `bd create "title" -l <label>` — file new work

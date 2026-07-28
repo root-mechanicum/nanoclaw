@@ -1189,7 +1189,10 @@ async function main(): Promise<void> {
           chat_jid: paJidSweep,
           prompt:
             '[Escalated Sweep] Check your pa-agent bead inbox and process decision gates. Run:\n' +
-            '  bd list --assignee pa-agent --status open --json\n' +
+            // `--limit 0` is load-bearing: `bd list` caps at 50 rows silently.
+            // This sweep enumerates open pa-agent decision gates, so a cut page
+            // drops decisions with no error and no warning (dev-7dpw7w).
+            '  bd list --assignee pa-agent --status open --json --limit 0\n' +
             'For each open bead whose title starts with "Agree:" or "Approve:" and carries the `escalated` label, follow the pa-agent skill: fetch evidence KVs referenced in the description, build a DECISION-TEMPLATE payload, and post it to Slack #pa. Bundle all pending decisions into a single message (D1, D2, …). If there is nothing to process, exit immediately without posting.',
           schedule_type: 'interval',
           schedule_value: String(intervalMs),
