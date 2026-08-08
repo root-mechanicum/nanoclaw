@@ -10,7 +10,11 @@ import {
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
-import { ContainerOutput, runContainerAgent, writeTasksSnapshot } from './container-runner.js';
+import {
+  ContainerOutput,
+  runContainerAgent,
+  writeTasksSnapshot,
+} from './container-runner.js';
 import { runHostAgent } from './host-runner.js';
 import {
   getAllTasks,
@@ -21,10 +25,17 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
-import { shouldSuppressPaNoopForward } from './noop-suppression.js';
+import {
+  _paFloodSignature,
+  shouldSuppressPaNoopForward,
+} from './noop-suppression.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
-import { collectBriefingData, formatBriefingPrompt, writeBriefingPayload } from './briefing.js';
+import {
+  collectBriefingData,
+  formatBriefingPrompt,
+  writeBriefingPayload,
+} from './briefing.js';
 
 import type { AgentMailPoller } from './agent-mail-poller.js';
 import type { EmailPoller } from './email-poller.js';
@@ -33,7 +44,12 @@ export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
-  onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
+  onProcess: (
+    groupJid: string,
+    proc: ChildProcess,
+    containerName: string,
+    groupFolder: string,
+  ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
   emailPoller?: EmailPoller | null;
   agentMailPoller?: AgentMailPoller | null;
@@ -96,7 +112,9 @@ async function runTask(
   const isMorningBriefing = prompt.includes('[Morning Briefing]');
   const isEveningBriefing = prompt.includes('[Evening Briefing]');
   if (isMorningBriefing || isEveningBriefing) {
-    const briefingType = isMorningBriefing ? 'morning' as const : 'evening' as const;
+    const briefingType = isMorningBriefing
+      ? ('morning' as const)
+      : ('evening' as const);
     try {
       const briefingData = collectBriefingData(
         deps.emailPoller ?? null,
@@ -105,7 +123,10 @@ async function runTask(
       );
       writeBriefingPayload(task.group_folder, briefingData);
       prompt = formatBriefingPrompt(briefingData, deps.briefingChannelId);
-      logger.info({ taskId: task.id, type: briefingType }, 'Briefing data pre-fetched');
+      logger.info(
+        { taskId: task.id, type: briefingType },
+        'Briefing data pre-fetched',
+      );
     } catch (err) {
       logger.error({ err, taskId: task.id }, 'Failed to collect briefing data');
     }
@@ -138,10 +159,14 @@ async function runTask(
   // Without this, host-only features (e.g. bd, Agent Mail) silently fail in
   // scheduled tasks even though interactive PA uses the host runner. (dev-zwf7i)
   const useHostRunner =
-    (isMain && /^(1|true|yes)$/i.test((process.env.PA_HOST_MODE || '').trim())) ||
+    (isMain &&
+      /^(1|true|yes)$/i.test((process.env.PA_HOST_MODE || '').trim())) ||
     !!group.hostMode;
   if (useHostRunner) {
-    logger.info({ taskId: task.id, group: group.name, isMain }, 'Using host runner for scheduled task');
+    logger.info(
+      { taskId: task.id, group: group.name, isMain },
+      'Using host runner for scheduled task',
+    );
   }
 
   const runAgent = useHostRunner ? runHostAgent : runContainerAgent;
@@ -157,7 +182,8 @@ async function runTask(
         isMain,
         isScheduledTask: true,
       },
-      (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+      (proc, containerName) =>
+        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
@@ -170,10 +196,24 @@ async function runTask(
           // through this final-result forward, so suppressing a NO-OP summary
           // here never drops a real decision. startTime is this task's cycle
           // start (for the marker-mtime check).
-          if (shouldSuppressPaNoopForward(isMain, streamedOutput.result, startTime)) {
+          if (
+            shouldSuppressPaNoopForward(
+              isMain,
+              streamedOutput.result,
+              startTime,
+            )
+          ) {
             logger.info(
-              { taskId: task.id, group: group.name },
-              'PA TRUE NO-OP — suppressing scheduled-task result forward to channel',
+              {
+                taskId: task.id,
+                group: group.name,
+                // dev-g1q83r: name WHY it was dropped. This is the path the
+                // ~30min escalated sweep travels, i.e. the one that carried both
+                // the 07-24 OAuth flood and the 07-31 usage-limit flood.
+                floodSignature: _paFloodSignature(streamedOutput.result),
+                bodyHead: streamedOutput.result.slice(0, 120),
+              },
+              'PA flood gate — suppressing scheduled-task result forward to channel',
             );
           } else {
             // Forward result to user (sendMessage handles formatting)
@@ -264,10 +304,8 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        deps.queue.enqueueTask(
-          currentTask.chat_jid,
-          currentTask.id,
-          () => runTask(currentTask, deps),
+        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
+          runTask(currentTask, deps),
         );
       }
     } catch (err) {

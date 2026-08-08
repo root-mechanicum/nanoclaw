@@ -3,12 +3,13 @@ import fs from 'fs';
 import { PA_NOOP_MARKER } from './config.js';
 
 /**
- * PA #pa flood suppression (dev-4ipl3 / dev-vbyy3 / dev-1f82i / dev-64rwo / dev-v0qm6).
+ * PA #pa flood suppression
+ * (dev-4ipl3 / dev-vbyy3 / dev-1f82i / dev-64rwo / dev-v0qm6 / dev-g1q83r).
  *
  * Independent, OR'd gates decide whether PA's final-turn summary text should be
  * dropped instead of forwarded to #pa: two NO-OP-narration gates (marker +
- * content) and a transient-error cooldown gate (dev-v0qm6). Genuine decision
- * cards are posted via
+ * content) and a repeat-body cooldown gate (dev-v0qm6, made trigger-agnostic in
+ * dev-g1q83r). Genuine decision cards are posted via
  * the Slack MCP DURING the cycle (decision-formatter / conversations_add_message),
  * never through a final-result forward — so dropping a final-turn summary can
  * never suppress a real decision card. That asymmetry is what makes both gates
@@ -74,73 +75,159 @@ export function _isPaNoopNarration(text: string): boolean {
 }
 
 /**
- * dev-v0qm6: transient-error final-turn flood gate.
+ * dev-v0qm6 → generalised by dev-g1q83r: repeat-final-turn flood gate.
  *
  * The two NO-OP gates above only catch heartbeat *narration*. They miss the
- * other observed flood class: genuine ERROR final-turns. When PA's `claude -p`
- * dies on a transient API failure (credential expiry → 401, rate limit → 429,
- * Overloaded → 529/5xx), the raw error text becomes the final-turn body and is
- * forwarded to #pa once per escalated-sweep. Observed 2026-06-20→21: ~50
- * identical "API Error: 401 Invalid authentication credentials" posts at ~31min
- * cadence, re-burying real decision bundles — the same harm dev-4ipl3
- * documented, different trigger.
+ * other observed flood class: dead-session final-turns. When PA's `claude -p`
+ * cannot do any work at all — credential expiry → 401, rate limit → 429,
+ * Overloaded → 529/5xx, an unrefreshable OAuth session, an exhausted weekly
+ * usage allowance — the harness's own error text becomes the final-turn body
+ * and is forwarded to #pa once per escalated-sweep.
  *
- * These are not NO-OP narration, so the content-regex gate does not match them.
- * They also carry no decision value (real decision cards travel via the Slack
- * MCP DURING the cycle, never this forward — see module note), so suppressing
- * the FLOOD is safe. We deliberately do NOT drop the error unconditionally: the
- * FIRST occurrence of a given failure class is operator-relevant signal ("PA is
- * down on auth"). So we forward the first, then suppress repeats of the same
- * signature within a cooldown window. One signal, no flood.
+ * WHY THIS GATE IS SIGNATURE-BASED AND NOT STRING-BASED (dev-g1q83r). dev-v0qm6
+ * shipped a regex over the ONE trigger observed at the time ("API Error: 401 …")
+ * and the flood recurred twice through the same sink with different text:
+ *
+ *   275 sessions  "Failed to authenticate: OAuth session expired and could not
+ *                  be refreshed"                        (2026-07-24 → 07-28)
+ *   121 sessions  "You've hit your weekly limit · resets Aug 5, 3am (UTC)"
+ *                                                       (2026-07-31 → 08-05)
+ *     4 sessions  "API Error: 529 Overloaded …"         (matched the old regex)
+ *
+ * (Counts measured over the Claude Code transcripts on disk; all agent_type=
+ * pa-agent, all zero tool calls, all exiting within ~2s — the session never
+ * reached the point of doing work. The 08-05 burst buried the ENTIRE live
+ * decision queue, D0–D25 including 8 P1s, for 4+ days.)
+ *
+ * The lesson: the flood's defining property is REPETITION, not any particular
+ * error string. So the cooldown arm is now trigger-agnostic — EVERY final-turn
+ * body gets a signature, and a repeat of that signature inside the window is
+ * dropped. Known failure classes get a coarse class key so spelling variants of
+ * the same outage collapse to one post ("resets 3am (UTC)" and "resets Aug 5,
+ * 3am (UTC)" are one usage-limit outage, not two); everything else falls back
+ * to a normalised hash of the body itself, which needs no foreknowledge of the
+ * next trigger. Adding a class is an optimisation, never a prerequisite.
+ *
+ * Suppressing the FLOOD is safe because real content never travels this path:
+ * decision cards (decision-formatter) and briefings (briefing.ts) are posted by
+ * PA via the Slack MCP send_message tool DURING the cycle — see module note. We
+ * deliberately do NOT drop unconditionally: the FIRST occurrence of a signature
+ * is operator-relevant signal ("PA is down on auth"). One signal, no flood.
  */
-const PA_TRANSIENT_ERROR_RE =
-  /API Error:\s*(?:401|429|529|5\d\d)\b|Invalid authentication credentials|\bOverloaded\b/i;
 
-export function _isPaTransientError(text: string): boolean {
-  return PA_TRANSIENT_ERROR_RE.test(text);
+/**
+ * Ordered failure-class table. First match wins, so more specific classes come
+ * first: "Failed to authenticate. API Error: 401 …" keys on api-error-401, not
+ * on the generic auth class, keeping the whole 401 burst on one key.
+ */
+const PA_FAILURE_CLASSES: ReadonlyArray<{ key: string; re: RegExp }> = [
+  {
+    key: 'api-error-401',
+    re: /API Error:\s*401\b|Invalid authentication credentials/i,
+  },
+  { key: 'api-error-429', re: /API Error:\s*429\b/i },
+  { key: 'api-error-5xx', re: /API Error:\s*5\d\d\b|\bOverloaded\b/i },
+  {
+    key: 'usage-limit',
+    re: /\b(?:weekly|daily|hourly|monthly|5-hour|usage|rate) limit\b|\blimit\b[^.\n]{0,40}\bresets\b/i,
+  },
+  {
+    key: 'auth-session',
+    re: /OAuth\s+(?:session|token)\b|\bcould not be refreshed\b|\bFailed to authenticate\b|\bsession (?:expired|revoked)\b/i,
+  },
+  { key: 'credit-balance', re: /Credit balance is too low/i },
+  {
+    key: 'login-required',
+    re: /Please run \/login|\/login to (?:re-?)?authenticate/i,
+  },
+];
+
+/**
+ * Return the coarse failure class for a body, or null when it matches no known
+ * class. Null is NOT "safe to forward repeatedly" — see _paFloodSignature, which
+ * falls back to a body hash so unknown triggers are still deduped.
+ */
+export function _paFailureClass(text: string): string | null {
+  for (const { key, re } of PA_FAILURE_CLASSES) {
+    if (re.test(text)) return key;
+  }
+  return null;
+}
+
+export function _isPaKnownFailure(text: string): boolean {
+  return _paFailureClass(text) !== null;
 }
 
 /**
- * Reduce a transient-error body to a coarse signature so repeats of the same
- * failure class collapse to one key (e.g. every "API Error: 401 …" burst shares
- * the signature "api error: 401"). Returns null when the body is not a
- * transient error. The match starts at the earliest position, so a
- * "Failed to authenticate. API Error: 401 Invalid authentication credentials"
- * body keys on "api error: 401", not the trailing credentials phrase.
+ * Normalise a body for hashing: case-folded, whitespace-collapsed, and with
+ * digit runs replaced by '#' so embedded clocks, dates and counters do not split
+ * one repeating message into many signatures.
  */
-export function _paTransientErrorSignature(text: string): string | null {
-  const m = text.match(PA_TRANSIENT_ERROR_RE);
-  return m ? m[0].toLowerCase().replace(/\s+/g, ' ') : null;
+function _normalizeBody(text: string): string {
+  return text.toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
 }
 
-// Default cooldown: forward at most one post per failure signature per 6h.
+/** djb2, base36 — short stable key, no crypto dependency needed. */
+function _hash(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+/**
+ * Signature for a final-turn body. Never null: a known failure class keys on
+ * that class, anything else keys on a hash of the normalised body. That
+ * fallback is what makes the gate trigger-agnostic — the NEXT unknown flood is
+ * deduped without anyone having to add its string here first.
+ */
+export function _paFloodSignature(text: string): string {
+  return _paFailureClass(text) ?? `body:${_hash(_normalizeBody(text))}`;
+}
+
+// Default cooldown: forward at most one post per signature per 6h.
 export const PA_ERROR_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
-// Module-level cooldown state, keyed by failure signature. Persists across
-// cycles within the long-lived nanoclaw daemon process; a daemon restart resets
-// it (which is fine — a restart is itself a new operator-relevant boundary).
+// Cap on distinct signatures retained. Every forwarded body now creates a key
+// (not just known errors), so the map is bounded and evicts oldest-first.
+export const PA_FLOOD_STATE_MAX = 200;
+
+// Module-level cooldown state, keyed by signature. Persists across cycles within
+// the long-lived nanoclaw daemon process; a daemon restart resets it (which is
+// fine — a restart is itself a new operator-relevant boundary).
 const _paErrorLastForward = new Map<string, number>();
 
+function _recordForward(
+  state: Map<string, number>,
+  sig: string,
+  nowMs: number,
+): void {
+  state.set(sig, nowMs);
+  // Map iteration is insertion-ordered, so the first key is the oldest insert.
+  while (state.size > PA_FLOOD_STATE_MAX) {
+    const oldest = state.keys().next();
+    if (oldest.done) break;
+    state.delete(oldest.value);
+  }
+}
+
 /**
- * Returns true when this transient-error body should be SUPPRESSED because the
- * same signature was already forwarded within the cooldown window. The first
- * occurrence per window returns false (forward it) and records `nowMs`. Bodies
- * that are not transient errors always return false. `state` is injectable for
- * testing; production callers use the module-level map.
+ * Returns true when this final-turn body should be SUPPRESSED because the same
+ * signature was already forwarded within the cooldown window. The first
+ * occurrence per window returns false (forward it) and records `nowMs`. `state`
+ * is injectable for testing; production callers use the module-level map.
  */
-export function _paErrorWithinCooldown(
+export function _paRepeatWithinCooldown(
   text: string,
   nowMs: number,
   cooldownMs = PA_ERROR_COOLDOWN_MS,
   state: Map<string, number> = _paErrorLastForward,
 ): boolean {
-  const sig = _paTransientErrorSignature(text);
-  if (sig === null) return false;
+  const sig = _paFloodSignature(text);
   const last = state.get(sig);
   if (last !== undefined && nowMs - last < cooldownMs) {
     return true; // repeat within cooldown → suppress
   }
-  state.set(sig, nowMs); // first in window → record and forward
+  _recordForward(state, sig, nowMs); // first in window → record and forward
   return false;
 }
 
@@ -157,6 +244,8 @@ export function shouldSuppressPaNoopForward(
 ): boolean {
   if (!isMain) return false;
   if (_paNoopMarkedSince(cycleStartMs) || _isPaNoopNarration(text)) return true;
-  // dev-v0qm6: forward the first transient error of each class, drop the flood.
-  return _paErrorWithinCooldown(text, cycleStartMs);
+  // dev-v0qm6 / dev-g1q83r: forward the first body of each signature, drop the
+  // repeats. Applies to EVERY body, not just recognised error strings — the
+  // last two floods both arrived with text no regex here had seen before.
+  return _paRepeatWithinCooldown(text, cycleStartMs);
 }

@@ -41,7 +41,14 @@ import {
 import { AgentMailPoller } from './agent-mail-poller.js';
 import { recordAgentActivity, getSilentAgents } from './agent-liveness.js';
 import { postAlert } from './alerts.js';
-import { trackBlocker, getStaleBlockers, escalateBlocker, setBlockerSlackTs, resolveBlocker, clearResolvedBlocker } from './blocker-tracker.js';
+import {
+  trackBlocker,
+  getStaleBlockers,
+  escalateBlocker,
+  setBlockerSlackTs,
+  resolveBlocker,
+  clearResolvedBlocker,
+} from './blocker-tracker.js';
 import { EmailPoller } from './email-poller.js';
 import { EmailSender } from './email-sender.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
@@ -54,7 +61,10 @@ import {
   writeTasksSnapshot,
 } from './container-runner.js';
 import { runHostAgent } from './host-runner.js';
-import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
+import {
+  cleanupOrphans,
+  ensureContainerRuntimeRunning,
+} from './container-runtime.js';
 import {
   createTask,
   getAllChats,
@@ -78,7 +88,7 @@ import { startIpcWatcher } from './ipc.js';
 import { detectMagicCommand } from './magic-commands.js';
 import {
   _isPaNoopNarration,
-  _isPaTransientError,
+  _paFloodSignature,
   _paNoopMarkedSince,
   shouldSuppressPaNoopForward,
 } from './noop-suppression.js';
@@ -110,14 +120,21 @@ interface ExecutionProfile {
   reason: string;
 }
 
-function chooseExecutionProfile(chatJid: string, messages: NewMessage[]): ExecutionProfile {
+function chooseExecutionProfile(
+  chatJid: string,
+  messages: NewMessage[],
+): ExecutionProfile {
   const defaultProvider =
     (process.env.PA_PROVIDER_DEFAULT || 'codex').toLowerCase() === 'claude'
       ? 'claude'
       : 'codex';
-  const stickyEnabled =
-    !/^(0|false|no)$/i.test((process.env.PA_PROVIDER_STICKY || 'true').trim());
-  const cheapModel = process.env.PA_CHEAP_MODEL || process.env.NANOCLAW_MODEL || 'claude-sonnet-4-5';
+  const stickyEnabled = !/^(0|false|no)$/i.test(
+    (process.env.PA_PROVIDER_STICKY || 'true').trim(),
+  );
+  const cheapModel =
+    process.env.PA_CHEAP_MODEL ||
+    process.env.NANOCLAW_MODEL ||
+    'claude-sonnet-4-5';
   const heavyModel = process.env.PA_HEAVY_MODEL || cheapModel;
 
   const text = messages
@@ -127,7 +144,9 @@ function chooseExecutionProfile(chatJid: string, messages: NewMessage[]): Execut
   const hasCodexOverride = /\[(use-codex|provider:codex)\]/i.test(text);
   const hasClaudeOverride = /\[(use-claude|provider:claude)\]/i.test(text);
   const needsHeavyReasoning =
-    /\b(strategy|governance|constitutional|tradeoff|architecture|discuss|long-form|briefing)\b/i.test(text);
+    /\b(strategy|governance|constitutional|tradeoff|architecture|discuss|long-form|briefing)\b/i.test(
+      text,
+    );
   const urgentOrBlocked = /\[(blocked|error|urgent)\]/i.test(text);
 
   let provider: 'claude' | 'codex' = defaultProvider;
@@ -210,20 +229,30 @@ function loadState(): void {
             hostCwd: hg.hostCwd,
           };
           registerGroup(hg.jid, group);
-          logger.info({ jid: hg.jid, folder: hg.folder, agentName: hg.agentName }, 'Host group registered from HOST_GROUPS env');
+          logger.info(
+            { jid: hg.jid, folder: hg.folder, agentName: hg.agentName },
+            'Host group registered from HOST_GROUPS env',
+          );
         } else {
           // Update existing group with host mode settings
           const existing = registeredGroups[hg.jid];
           existing.hostMode = true;
           if (hg.agentName) existing.agentName = hg.agentName;
           if (hg.hostCwd) existing.hostCwd = hg.hostCwd;
-          if (hg.requiresTrigger !== undefined) existing.requiresTrigger = hg.requiresTrigger;
+          if (hg.requiresTrigger !== undefined)
+            existing.requiresTrigger = hg.requiresTrigger;
           setRegisteredGroup(hg.jid, existing);
-          logger.info({ jid: hg.jid, folder: hg.folder }, 'Host group updated from HOST_GROUPS env');
+          logger.info(
+            { jid: hg.jid, folder: hg.folder },
+            'Host group updated from HOST_GROUPS env',
+          );
         }
       }
     } catch (err) {
-      logger.error({ err, raw: hostGroupsEnv }, 'Failed to parse HOST_GROUPS env var');
+      logger.error(
+        { err, raw: hostGroupsEnv },
+        'Failed to parse HOST_GROUPS env var',
+      );
     }
   }
 
@@ -235,10 +264,7 @@ function loadState(): void {
 
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
-  setRouterState(
-    'last_agent_timestamp',
-    JSON.stringify(lastAgentTimestamp),
-  );
+  setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -274,7 +300,9 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
 }
 
 /** @internal - exported for testing */
-export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): void {
+export function _setRegisteredGroups(
+  groups: Record<string, RegisteredGroup>,
+): void {
   registeredGroups = groups;
 }
 
@@ -302,7 +330,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-  let missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+  let missedMessages = getMessagesSince(
+    chatJid,
+    sinceTimestamp,
+    ASSISTANT_NAME,
+  );
 
   if (missedMessages.length === 0) return true;
 
@@ -314,12 +346,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (missedMessages.length > MAX_MESSAGE_BATCH) {
     const skipped = missedMessages.length - MAX_MESSAGE_BATCH;
     logger.warn(
-      { group: group.name, total: missedMessages.length, skipped, kept: MAX_MESSAGE_BATCH },
+      {
+        group: group.name,
+        total: missedMessages.length,
+        skipped,
+        kept: MAX_MESSAGE_BATCH,
+      },
       'Message backlog exceeds batch limit, skipping older messages',
     );
     // Advance cursor past skipped messages so they won't be retried
     const skippedMessages = missedMessages.slice(0, skipped);
-    lastAgentTimestamp[chatJid] = skippedMessages[skippedMessages.length - 1].timestamp;
+    lastAgentTimestamp[chatJid] =
+      skippedMessages[skippedMessages.length - 1].timestamp;
     saveState();
     // Only process the most recent messages
     missedMessages = missedMessages.slice(skipped);
@@ -367,7 +405,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug({ group: group.name }, 'Idle timeout, closing container stdin');
+      logger.debug(
+        { group: group.name },
+        'Idle timeout, closing container stdin',
+      );
       queue.closeStdin(chatJid);
     }, IDLE_TIMEOUT);
   };
@@ -391,70 +432,85 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Execution profile selected',
   );
 
-  const output = await runAgent(group, prompt, chatJid, executionProfile, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    executionProfile,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
 
-      // Detect auth failure in streaming output — kill the container immediately
-      // so it doesn't keep looping with an expired token via IPC
-      const isAuthFailure =
-        raw.includes('authentication_error') ||
-        raw.includes('OAuth token has expired');
-      if (isAuthFailure) {
-        logger.warn(
-          { group: group.name },
-          'Auth failure detected in streaming output, killing container to force fresh token on next spawn',
-        );
-        queue.closeStdin(chatJid);
-        hadError = true;
-        return;
-      }
-
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        // dev-vbyy3 + dev-1f82i: on a TRUE NO-OP PA cycle, suppress forwarding
-        // the final summary text to #pa. Two independent gates, OR'd so either
-        // catches the flood:
-        //   (1) marker gate (dev-vbyy3): PA touched PA_NOOP_MARKER this cycle.
-        //   (2) content gate (dev-1f82i): the summary body reads like NO-OP
-        //       heartbeat narration. Robust to the observed failure where PA
-        //       never touches the marker (wake via scheduled sweep) yet still
-        //       emits a "exited silently" summary that reaches #pa.
-        // Forwarding either is surface-burn that buries genuine decision cards.
-        // Genuine decision cards are posted via the Slack MCP during the cycle,
-        // not via this final-result forward, so they are unaffected.
-        if (shouldSuppressPaNoopForward(isMainGroup, text, cycleStartMs)) {
-          logger.info(
-            {
-              group: group.name,
-              markerGate: _paNoopMarkedSince(cycleStartMs),
-              contentGate: _isPaNoopNarration(text),
-              // dev-v0qm6: pure predicate (no cooldown side effect) — flags when
-              // the suppression was the transient-error gate, not a NO-OP.
-              errorGate: _isPaTransientError(text),
-            },
-            'PA flood gate — suppressing final-result forward to channel',
+        // Detect auth failure in streaming output — kill the container immediately
+        // so it doesn't keep looping with an expired token via IPC
+        const isAuthFailure =
+          raw.includes('authentication_error') ||
+          raw.includes('OAuth token has expired');
+        if (isAuthFailure) {
+          logger.warn(
+            { group: group.name },
+            'Auth failure detected in streaming output, killing container to force fresh token on next spawn',
           );
-        } else {
-          await channel.sendMessage(chatJid, text);
-          outputSentToUser = true;
+          queue.closeStdin(chatJid);
+          hadError = true;
+          return;
         }
+
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.slice(0, 200)}`,
+        );
+        if (text) {
+          // dev-vbyy3 + dev-1f82i: on a TRUE NO-OP PA cycle, suppress forwarding
+          // the final summary text to #pa. Two independent gates, OR'd so either
+          // catches the flood:
+          //   (1) marker gate (dev-vbyy3): PA touched PA_NOOP_MARKER this cycle.
+          //   (2) content gate (dev-1f82i): the summary body reads like NO-OP
+          //       heartbeat narration. Robust to the observed failure where PA
+          //       never touches the marker (wake via scheduled sweep) yet still
+          //       emits a "exited silently" summary that reaches #pa.
+          // Forwarding either is surface-burn that buries genuine decision cards.
+          // Genuine decision cards are posted via the Slack MCP during the cycle,
+          // not via this final-result forward, so they are unaffected.
+          if (shouldSuppressPaNoopForward(isMainGroup, text, cycleStartMs)) {
+            logger.info(
+              {
+                group: group.name,
+                markerGate: _paNoopMarkedSince(cycleStartMs),
+                contentGate: _isPaNoopNarration(text),
+                // dev-g1q83r: the signature the repeat gate keyed on (pure — no
+                // cooldown side effect). When neither gate above is true, THIS is
+                // why the body was dropped, and it names the class (or body hash)
+                // so an operator can tell one silent flood from another.
+                floodSignature: _paFloodSignature(text),
+                bodyHead: text.slice(0, 120),
+              },
+              'PA flood gate — suppressing final-result forward to channel',
+            );
+          } else {
+            await channel.sendMessage(chatJid, text);
+            outputSentToUser = true;
+          }
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+  );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -463,14 +519,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
-      logger.warn({ group: group.name }, 'Agent error after output was sent, skipping cursor rollback to prevent duplicates');
+      logger.warn(
+        { group: group.name },
+        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+      );
       return true;
     }
     // Check if retries are about to be exhausted — if so, DON'T roll back
     // the cursor. This prevents a poisoned message batch (e.g. 950+ messages)
     // from being retried indefinitely across service restarts.
     const retryCount = queue.getRetryCount(chatJid);
-    if (retryCount >= 4) { // MAX_RETRIES is 5, this is the last attempt
+    if (retryCount >= 4) {
+      // MAX_RETRIES is 5, this is the last attempt
       logger.error(
         { group: group.name, retryCount },
         'Retries nearly exhausted, advancing cursor to prevent infinite retry loop',
@@ -482,7 +542,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
-    logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
+    logger.warn(
+      { group: group.name },
+      'Agent error, rolled back message cursor for retry',
+    );
     return false;
   }
 
@@ -498,7 +561,8 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const paCheapNoResume =
-    isMain && /^(1|true|yes)$/i.test((process.env.PA_CHEAP_NO_RESUME || '').trim());
+    isMain &&
+    /^(1|true|yes)$/i.test((process.env.PA_CHEAP_NO_RESUME || '').trim());
   const sessionId = paCheapNoResume ? undefined : sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -543,10 +607,14 @@ async function runAgent(
   // Use host runner when: (a) PA main group with PA_HOST_MODE=1, or (b) group.hostMode is true.
   // Host mode gives agents direct access to bd, Agent Mail, and all host tools.
   const useHostRunner =
-    (isMain && /^(1|true|yes)$/i.test((process.env.PA_HOST_MODE || '').trim())) ||
+    (isMain &&
+      /^(1|true|yes)$/i.test((process.env.PA_HOST_MODE || '').trim())) ||
     !!group.hostMode;
   if (useHostRunner) {
-    logger.info({ group: group.name, hostMode: group.hostMode, isMain }, 'Using host runner');
+    logger.info(
+      { group: group.name, hostMode: group.hostMode, isMain },
+      'Using host runner',
+    );
   }
 
   try {
@@ -561,12 +629,24 @@ async function runAgent(
       providerReason: executionProfile.reason,
     };
 
-    const onProcessRegistered = (proc: import('child_process').ChildProcess, name: string) =>
-      queue.registerProcess(chatJid, proc, name, group.folder);
+    const onProcessRegistered = (
+      proc: import('child_process').ChildProcess,
+      name: string,
+    ) => queue.registerProcess(chatJid, proc, name, group.folder);
 
     const output = useHostRunner
-      ? await runHostAgent(group, runnerInput, onProcessRegistered, wrappedOnOutput)
-      : await runContainerAgent(group, runnerInput, onProcessRegistered, wrappedOnOutput);
+      ? await runHostAgent(
+          group,
+          runnerInput,
+          onProcessRegistered,
+          wrappedOnOutput,
+        )
+      : await runContainerAgent(
+          group,
+          runnerInput,
+          onProcessRegistered,
+          wrappedOnOutput,
+        );
 
     if (output.newSessionId && !paCheapNoResume) {
       sessions[group.folder] = output.newSessionId;
@@ -575,30 +655,30 @@ async function runAgent(
 
     // Detect AUP refusal — the session is now poisoned and must be reset
     const aupPoisoned =
-      (output.result?.includes('violate our Usage Policy') ||
-        output.error?.includes('violate our Usage Policy'));
+      output.result?.includes('violate our Usage Policy') ||
+      output.error?.includes('violate our Usage Policy');
 
     // Detect auth failure — session stuck after rate limit (Claude Code bug)
     const authPoisoned =
-      (output.result?.includes('authentication_error') ||
-        output.error?.includes('authentication_error') ||
-        output.result?.includes('OAuth token has expired') ||
-        output.error?.includes('OAuth token has expired'));
+      output.result?.includes('authentication_error') ||
+      output.error?.includes('authentication_error') ||
+      output.result?.includes('OAuth token has expired') ||
+      output.error?.includes('OAuth token has expired');
 
     // Detect stale session — claude -p --resume fails when session expired or was
     // cleaned up (e.g. after RuntimeMaxSec restart). Without this, each retry gets
     // a new session_id from the error response, saves it, and the next retry also
     // fails → infinite retry loop burning 1000+ attempts/day.
     const sessionNotFound =
-      (output.result?.includes('No conversation found with session ID') ||
-        output.error?.includes('No conversation found with session ID'));
+      output.result?.includes('No conversation found with session ID') ||
+      output.error?.includes('No conversation found with session ID');
 
     // Detect rate limit — "You've hit your limit · resets 3pm (UTC)"
     // Without this, each retry spawns a new claude process that immediately
     // hits the same limit, creating a crash-loop of 50+ spawns/hour.
     const rateLimitHit =
-      (output.error?.includes('hit your limit') ||
-        output.result?.includes('hit your limit'));
+      output.error?.includes('hit your limit') ||
+      output.result?.includes('hit your limit');
 
     if (rateLimitHit) {
       // Parse reset time from error message, e.g. "resets 3pm (UTC)"
@@ -637,8 +717,15 @@ async function runAgent(
       deleteSession(group.folder);
     }
 
-    if ((aupPoisoned || authPoisoned || sessionNotFound) && output.newSessionId) {
-      const reason = aupPoisoned ? 'aup' : authPoisoned ? 'auth' : 'session-not-found';
+    if (
+      (aupPoisoned || authPoisoned || sessionNotFound) &&
+      output.newSessionId
+    ) {
+      const reason = aupPoisoned
+        ? 'aup'
+        : authPoisoned
+          ? 'auth'
+          : 'session-not-found';
       logger.warn(
         { group: group.name, sessionId: output.newSessionId, reason },
         `${reason === 'aup' ? 'AUP refusal' : reason === 'auth' ? 'Auth failure' : 'Stale session'} detected, clearing poisoned session`,
@@ -647,10 +734,19 @@ async function runAgent(
       deleteSession(group.folder);
       // Remove the session file so the next invocation starts fresh
       const sessionFile = path.join(
-        DATA_DIR, 'sessions', group.folder, '.claude', 'projects',
-        '-workspace-group', `${output.newSessionId}.jsonl`,
+        DATA_DIR,
+        'sessions',
+        group.folder,
+        '.claude',
+        'projects',
+        '-workspace-group',
+        `${output.newSessionId}.jsonl`,
       );
-      try { fs.unlinkSync(sessionFile); } catch { /* already gone */ }
+      try {
+        fs.unlinkSync(sessionFile);
+      } catch {
+        /* already gone */
+      }
     }
 
     if (output.status === 'error') {
@@ -680,7 +776,11 @@ async function startMessageLoop(): Promise<void> {
   while (true) {
     try {
       const jids = Object.keys(registeredGroups);
-      const { messages, newTimestamp } = getNewMessages(jids, lastTimestamp, ASSISTANT_NAME);
+      const { messages, newTimestamp } = getNewMessages(
+        jids,
+        lastTimestamp,
+        ASSISTANT_NAME,
+      );
 
       if (messages.length > 0) {
         logger.info({ count: messages.length }, 'New messages');
@@ -706,7 +806,9 @@ async function startMessageLoop(): Promise<void> {
 
           const channel = findChannel(channels, chatJid);
           if (!channel) {
-            console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
+            console.log(
+              `Warning: no channel owns JID ${chatJid}, skipping messages`,
+            );
             continue;
           }
 
@@ -743,9 +845,14 @@ async function startMessageLoop(): Promise<void> {
               lastAgentTimestamp[chatJid] =
                 messagesToSend[messagesToSend.length - 1].timestamp;
               saveState();
-              channel.setTyping?.(chatJid, true)?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-              );
+              channel
+                .setTyping?.(chatJid, true)
+                ?.catch((err) =>
+                  logger.warn(
+                    { chatJid, err },
+                    'Failed to set typing indicator',
+                  ),
+                );
             }
           } else {
             // No active container — enqueue for a new one (includes emails)
@@ -804,14 +911,23 @@ async function main(): Promise<void> {
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
-    onChatMetadata: (chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean) =>
-      storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+    onChatMetadata: (
+      chatJid: string,
+      timestamp: string,
+      name?: string,
+      channel?: string,
+      isGroup?: boolean,
+    ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
   };
 
   // Create and connect channels
   if (SLACK_BOT_TOKEN && SLACK_APP_TOKEN) {
-    const slack = new SlackChannel(SLACK_BOT_TOKEN, SLACK_APP_TOKEN, channelOpts);
+    const slack = new SlackChannel(
+      SLACK_BOT_TOKEN,
+      SLACK_APP_TOKEN,
+      channelOpts,
+    );
     channels.push(slack);
     await slack.connect();
   }
@@ -826,9 +942,9 @@ async function main(): Promise<void> {
   const slackChannel = channels.find((c) => c.name === 'slack') ?? null;
   const sendToAlerts = (text: string): void => {
     if (!slackChannel || !SLACK_ALERTS_CHANNEL) return;
-    slackChannel.sendMessage(`sl:${SLACK_ALERTS_CHANNEL}`, text).catch((err) =>
-      logger.warn({ err }, 'Failed to send to #alerts'),
-    );
+    slackChannel
+      .sendMessage(`sl:${SLACK_ALERTS_CHANNEL}`, text)
+      .catch((err) => logger.warn({ err }, 'Failed to send to #alerts'));
   };
 
   // Helper: send a message to #blockers via Slack API directly (returns message ts for later deletion)
@@ -838,13 +954,13 @@ async function main(): Promise<void> {
       const resp = await fetch('https://slack.com/api/chat.postMessage', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ channel: SLACK_BLOCKERS_CHANNEL, text }),
         signal: AbortSignal.timeout(5_000),
       });
-      const data = await resp.json() as { ok: boolean; ts?: string };
+      const data = (await resp.json()) as { ok: boolean; ts?: string };
       if (data.ok && data.ts) return data.ts;
       logger.warn({ data }, 'Slack postMessage to #blockers returned non-ok');
       return null;
@@ -861,7 +977,7 @@ async function main(): Promise<void> {
       await fetch(`https://slack.com/api/chat.delete`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ channel: SLACK_BLOCKERS_CHANNEL, ts }),
@@ -874,9 +990,17 @@ async function main(): Promise<void> {
   };
 
   // Helper: post to #emails channel (raw email visibility for human)
-  const sendToEmails = async (from: string, to: string, subject: string, body: string): Promise<void> => {
+  const sendToEmails = async (
+    from: string,
+    to: string,
+    subject: string,
+    body: string,
+  ): Promise<void> => {
     if (!SLACK_BOT_TOKEN || !SLACK_EMAILS_CHANNEL) {
-      logger.info({ hasBotToken: !!SLACK_BOT_TOKEN, channel: SLACK_EMAILS_CHANNEL }, 'sendToEmails: skipped (missing config)');
+      logger.info(
+        { hasBotToken: !!SLACK_BOT_TOKEN, channel: SLACK_EMAILS_CHANNEL },
+        'sendToEmails: skipped (missing config)',
+      );
       return;
     }
     const preview = body.length > 500 ? body.slice(0, 500) + '...' : body;
@@ -885,17 +1009,20 @@ async function main(): Promise<void> {
       const resp = await fetch('https://slack.com/api/chat.postMessage', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ channel: SLACK_EMAILS_CHANNEL, text }),
         signal: AbortSignal.timeout(5_000),
       });
-      const data = await resp.json() as { ok: boolean; error?: string };
+      const data = (await resp.json()) as { ok: boolean; error?: string };
       if (data.ok) {
         logger.info({ from, subject }, 'Email posted to #emails');
       } else {
-        logger.warn({ error: data.error, channel: SLACK_EMAILS_CHANNEL }, 'Slack rejected #emails post');
+        logger.warn(
+          { error: data.error, channel: SLACK_EMAILS_CHANNEL },
+          'Slack rejected #emails post',
+        );
       }
     } catch (err) {
       logger.warn({ err }, 'Failed to send to #emails');
@@ -912,7 +1039,8 @@ async function main(): Promise<void> {
       targetChatJid: AGENT_MAIL_TARGET_JID,
       onMessage: (_chatJid, msg) => storeMessage(msg),
       pollIntervalMs: AGENT_MAIL_POLL_INTERVAL,
-      onDown: () => postAlert('Agent Mail is unreachable. Agent coordination is offline.'),
+      onDown: () =>
+        postAlert('Agent Mail is unreachable. Agent coordination is offline.'),
       onRecovered: () => postAlert('Agent Mail connection restored.'),
       onAlert: (text) => {
         sendToAlerts(text);
@@ -921,7 +1049,8 @@ async function main(): Promise<void> {
         if (blockedMatch) {
           const idMatch = text.match(/am-(\d+)/);
           const blockerId = idMatch ? parseInt(idMatch[1], 10) : null;
-          if (blockerId) trackBlocker(blockerId, blockedMatch[1], blockedMatch[2]);
+          if (blockerId)
+            trackBlocker(blockerId, blockedMatch[1], blockedMatch[2]);
           sendToBlockers(text).then((slackTs) => {
             if (slackTs && blockerId) setBlockerSlackTs(blockerId, slackTs);
           });
@@ -941,7 +1070,8 @@ async function main(): Promise<void> {
           sendToBlockers(text);
         }
       },
-      onActivity: (sender, ts, subject) => recordAgentActivity(sender, ts, subject),
+      onActivity: (sender, ts, subject) =>
+        recordAgentActivity(sender, ts, subject),
     });
     await agentMailPoller.start();
   }
@@ -955,17 +1085,29 @@ async function main(): Promise<void> {
       imapPass: MAIL_IMAP_PASS,
       targetChatJid: MAIL_TARGET_JID,
       onMessage: (_chatJid, msg) => storeMessage(msg),
-      onEmail: (email) => sendToEmails(
-        `${email.from} <${email.fromAddress}>`, email.to, email.subject, email.body,
-      ),
+      onEmail: (email) =>
+        sendToEmails(
+          `${email.from} <${email.fromAddress}>`,
+          email.to,
+          email.subject,
+          email.body,
+        ),
       pollIntervalMs: MAIL_POLL_INTERVAL,
-      onDown: () => postAlert('Email (IMAP) is unreachable. Inbound email processing is offline.'),
+      onDown: () =>
+        postAlert(
+          'Email (IMAP) is unreachable. Inbound email processing is offline.',
+        ),
       onRecovered: () => postAlert('Email (IMAP) connection restored.'),
     });
     await emailPoller.start();
 
     // Write email snapshot to main group's IPC dir for container MCP tools
-    const emailSnapshotPath = path.join(DATA_DIR, 'ipc', MAIN_GROUP_FOLDER, 'email_inbox.json');
+    const emailSnapshotPath = path.join(
+      DATA_DIR,
+      'ipc',
+      MAIN_GROUP_FOLDER,
+      'email_inbox.json',
+    );
     const writeEmailSnapshot = () => {
       try {
         emailPoller!.writeSnapshot(emailSnapshotPath);
@@ -974,10 +1116,13 @@ async function main(): Promise<void> {
       }
     };
     // Seed cache with recent emails on startup (reads all recent, not just unseen)
-    emailPoller.fetchRecent(100).then(() => {
-      writeEmailSnapshot();
-      logger.info('Email cache seeded on startup');
-    }).catch((err) => logger.warn({ err }, 'Failed to seed email cache'));
+    emailPoller
+      .fetchRecent(100)
+      .then(() => {
+        writeEmailSnapshot();
+        logger.info('Email cache seeded on startup');
+      })
+      .catch((err) => logger.warn({ err }, 'Failed to seed email cache'));
     // Write after each poll cycle (match poll interval)
     setInterval(writeEmailSnapshot, MAIL_POLL_INTERVAL);
   }
@@ -1000,7 +1145,8 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    onProcess: (groupJid, proc, containerName, groupFolder) =>
+      queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
@@ -1022,15 +1168,20 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+    syncGroupMetadata: (force) =>
+      whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
-    sendEmail: emailSender
-      ? (args) => emailSender!.send(args)
-      : undefined,
+    writeGroupsSnapshot: (gf, im, ag, rj) =>
+      writeGroupsSnapshot(gf, im, ag, rj),
+    sendEmail: emailSender ? (args) => emailSender!.send(args) : undefined,
     fetchEmails: emailPoller
       ? async () => {
-          const snapshotPath = path.join(DATA_DIR, 'ipc', MAIN_GROUP_FOLDER, 'email_inbox.json');
+          const snapshotPath = path.join(
+            DATA_DIR,
+            'ipc',
+            MAIN_GROUP_FOLDER,
+            'email_inbox.json',
+          );
           await emailPoller!.fetchRecent();
           emailPoller!.writeSnapshot(snapshotPath);
         }
@@ -1053,51 +1204,68 @@ async function main(): Promise<void> {
   }
 
   // Blocker re-escalation — check every 10 minutes for stale [BLOCKED] messages
-  setInterval(() => {
-    try {
-      const stale = getStaleBlockers();
-      for (const blocker of stale) {
-        const newLevel = blocker.escalation_level + 1;
-        const age = Math.round((Date.now() - new Date(blocker.first_posted).getTime()) / 60_000);
-        const msg = `Reminder (L${newLevel}): [BLOCKED] from ${blocker.sender} — "${blocker.subject}" — unresolved for ${age} min`;
-        sendToBlockers(msg);
-        sendToAlerts(msg);
+  setInterval(
+    () => {
+      try {
+        const stale = getStaleBlockers();
+        for (const blocker of stale) {
+          const newLevel = blocker.escalation_level + 1;
+          const age = Math.round(
+            (Date.now() - new Date(blocker.first_posted).getTime()) / 60_000,
+          );
+          const msg = `Reminder (L${newLevel}): [BLOCKED] from ${blocker.sender} — "${blocker.subject}" — unresolved for ${age} min`;
+          sendToBlockers(msg);
+          sendToAlerts(msg);
 
-        // At L2+, also email PA's own inbox for out-of-band visibility
-        if (newLevel >= 2 && emailSender && MAIL_FROM_ADDRESS) {
-          emailSender.send({
-            to: MAIL_FROM_ADDRESS,
-            subject: `[BLOCKED L${newLevel}] ${blocker.subject}`,
-            body: msg,
-          }).catch((err) => logger.warn({ err }, 'Failed to send blocker escalation email'));
+          // At L2+, also email PA's own inbox for out-of-band visibility
+          if (newLevel >= 2 && emailSender && MAIL_FROM_ADDRESS) {
+            emailSender
+              .send({
+                to: MAIL_FROM_ADDRESS,
+                subject: `[BLOCKED L${newLevel}] ${blocker.subject}`,
+                body: msg,
+              })
+              .catch((err) =>
+                logger.warn({ err }, 'Failed to send blocker escalation email'),
+              );
+          }
+
+          escalateBlocker(blocker.agent_mail_id, newLevel);
         }
-
-        escalateBlocker(blocker.agent_mail_id, newLevel);
+      } catch (err) {
+        logger.error({ err }, 'Blocker escalation check failed');
       }
-    } catch (err) {
-      logger.error({ err }, 'Blocker escalation check failed');
-    }
-  }, 10 * 60 * 1000);
+    },
+    10 * 60 * 1000,
+  );
 
   // Agent liveness monitor — check every 60 minutes for silent agents
-  setInterval(() => {
-    try {
-      const silent = getSilentAgents(6);
-      if (silent.length > 0) {
-        const summary = silent
-          .map((a) => `${a.agent_name} (last seen: ${a.last_message_ts}${a.last_subject ? `, re: ${a.last_subject}` : ''})`)
-          .join('\n');
-        sendToAlerts(`Silent agents (>6h):\n${summary}`);
+  setInterval(
+    () => {
+      try {
+        const silent = getSilentAgents(6);
+        if (silent.length > 0) {
+          const summary = silent
+            .map(
+              (a) =>
+                `${a.agent_name} (last seen: ${a.last_message_ts}${a.last_subject ? `, re: ${a.last_subject}` : ''})`,
+            )
+            .join('\n');
+          sendToAlerts(`Silent agents (>6h):\n${summary}`);
+        }
+      } catch (err) {
+        logger.error({ err }, 'Agent liveness check failed');
       }
-    } catch (err) {
-      logger.error({ err }, 'Agent liveness check failed');
-    }
-  }, 60 * 60 * 1000);
+    },
+    60 * 60 * 1000,
+  );
 
   // Auto-register morning briefing task if SLACK_BRIEFING_CHANNEL is set
   if (SLACK_BRIEFING_CHANNEL) {
     const tasks = getAllTasks();
-    const hasBriefing = tasks.some((t) => t.prompt.includes('[Morning Briefing]') && t.status === 'active');
+    const hasBriefing = tasks.some(
+      (t) => t.prompt.includes('[Morning Briefing]') && t.status === 'active',
+    );
     if (!hasBriefing) {
       // Find the PA group JID
       const paJid = Object.entries(registeredGroups).find(
@@ -1109,7 +1277,8 @@ async function main(): Promise<void> {
           id: taskId,
           group_folder: MAIN_GROUP_FOLDER,
           chat_jid: paJid,
-          prompt: '[Morning Briefing] Collect system status and post a morning briefing to #briefing.',
+          prompt:
+            '[Morning Briefing] Collect system status and post a morning briefing to #briefing.',
           schedule_type: 'cron',
           schedule_value: '0 8 * * 1-5',
           context_mode: 'isolated',
@@ -1121,15 +1290,21 @@ async function main(): Promise<void> {
         const { CronExpressionParser } = await import('cron-parser');
         const { TIMEZONE } = await import('./config.js');
         try {
-          const interval = CronExpressionParser.parse('0 8 * * 1-5', { tz: TIMEZONE });
+          const interval = CronExpressionParser.parse('0 8 * * 1-5', {
+            tz: TIMEZONE,
+          });
           updateTask(taskId, { next_run: interval.next().toISOString() });
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
         logger.info({ taskId }, 'Auto-registered morning briefing task');
       }
     }
 
     // Auto-register evening briefing task
-    const hasEvening = tasks.some((t) => t.prompt.includes('[Evening Briefing]') && t.status === 'active');
+    const hasEvening = tasks.some(
+      (t) => t.prompt.includes('[Evening Briefing]') && t.status === 'active',
+    );
     if (!hasEvening) {
       const paJidEvening = Object.entries(registeredGroups).find(
         ([, g]) => g.folder === MAIN_GROUP_FOLDER,
@@ -1140,7 +1315,8 @@ async function main(): Promise<void> {
           id: taskId,
           group_folder: MAIN_GROUP_FOLDER,
           chat_jid: paJidEvening,
-          prompt: '[Evening Briefing] Collect end-of-day status and post an evening briefing to #briefing.',
+          prompt:
+            '[Evening Briefing] Collect end-of-day status and post an evening briefing to #briefing.',
           schedule_type: 'cron',
           schedule_value: '0 22 * * 0-6',
           context_mode: 'isolated',
@@ -1151,9 +1327,13 @@ async function main(): Promise<void> {
         const { CronExpressionParser } = await import('cron-parser');
         const { TIMEZONE } = await import('./config.js');
         try {
-          const interval = CronExpressionParser.parse('0 22 * * 0-6', { tz: TIMEZONE });
+          const interval = CronExpressionParser.parse('0 22 * * 0-6', {
+            tz: TIMEZONE,
+          });
           updateTask(taskId, { next_run: interval.next().toISOString() });
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
         logger.info({ taskId }, 'Auto-registered evening briefing task');
       }
     }
@@ -1235,7 +1415,10 @@ function startHealthServer(): void {
       const body = JSON.stringify({
         status,
         slack: { connected: slackConnected },
-        channels: channels.map((c) => ({ name: c.name, connected: c.isConnected() })),
+        channels: channels.map((c) => ({
+          name: c.name,
+          connected: c.isConnected(),
+        })),
         ...(agentMail && { agentMail }),
         ...(email && { email }),
         uptime: uptimeSeconds,
@@ -1265,7 +1448,8 @@ function startHealthServer(): void {
 // Guard: only run when executed directly, not when imported by tests
 const isDirectRun =
   process.argv[1] &&
-  new URL(import.meta.url).pathname === new URL(`file://${process.argv[1]}`).pathname;
+  new URL(import.meta.url).pathname ===
+    new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
   main().catch((err) => {
