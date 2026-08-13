@@ -116,11 +116,18 @@ export async function replaySkills(
   }
 
   // 3. Load pre-computed resolutions into git's rr-cache before replaying
-  // Pass the last skill's dir — it's the one applied on top, producing conflicts
-  const lastSkillDir = options.skills.length > 0
-    ? options.skillDirs[options.skills[options.skills.length - 1]]
-    : undefined;
-  loadResolutions(options.skills, projectRoot, lastSkillDir);
+  // Pass the last skill's dir — it's the one applied on top, producing conflicts.
+  //
+  // An empty skill list is legitimate (replaying "without" the only installed
+  // skill), but it has no last skill and therefore no resolution set: the cache
+  // is keyed on the sorted skill names, so an empty list keys the resolutions
+  // ROOT directory rather than a combination under it. There is nothing to load,
+  // so skip the call entirely. Step 1 above already returns early if any named
+  // skill lacks a directory, so a non-empty list always has a real last dir.
+  if (options.skills.length > 0) {
+    const lastSkill = options.skills[options.skills.length - 1];
+    loadResolutions(options.skills, projectRoot, options.skillDirs[lastSkill]);
+  }
 
   // Replay each skill in order
   // Collect structured ops for batch application

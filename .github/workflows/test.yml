@@ -14,5 +14,9 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx tsc --noEmit
+      # Covers BOTH tsconfigs (src/ and skills-engine/). Run the composite, not a
+      # bare `tsc --noEmit`: the root tsconfig is include:["src/**/*"], so a bare
+      # invocation is silent about skills-engine/ rather than green on it. Any
+      # lane added to `typecheck` in package.json is picked up here for free.
+      - run: npm run typecheck
       - run: npx vitest run
