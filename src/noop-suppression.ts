@@ -6,14 +6,20 @@ import { PA_NOOP_MARKER } from './config.js';
  * PA #pa flood suppression
  * (dev-4ipl3 / dev-vbyy3 / dev-1f82i / dev-64rwo / dev-v0qm6 / dev-g1q83r).
  *
- * Independent, OR'd gates decide whether PA's final-turn summary text should be
- * dropped instead of forwarded to #pa: two NO-OP-narration gates (marker +
- * content) and a repeat-body cooldown gate (dev-v0qm6, made trigger-agnostic in
- * dev-g1q83r). Genuine decision cards are posted via
- * the Slack MCP DURING the cycle (decision-formatter / conversations_add_message),
- * never through a final-result forward — so dropping a final-turn summary can
- * never suppress a real decision card. That asymmetry is what makes both gates
- * safe to apply on every PA final-turn forward.
+ * The PA final-turn forward is DENY-BY-DEFAULT (dev-l8uyw3). Genuine decision
+ * cards are posted via the Slack MCP DURING the cycle (decision-formatter /
+ * conversations_add_message), never through a final-result forward — so for the
+ * PA group every body arriving on this path is narration by construction, and
+ * dropping it can never suppress a real decision card. The single exception is a
+ * dead-session harness error (the "PA is down" pager), which PA could not have
+ * posted itself; see shouldSuppressPaNoopForward for the full argument.
+ *
+ * History matters here, because this file is the third attempt. The gate began as
+ * ALLOW-by-default with blocklists — a marker gate (dev-vbyy3), a content regex
+ * (dev-1f82i), and a repeat-body cooldown (dev-v0qm6, made trigger-agnostic by
+ * dev-g1q83r). Each widening covered only the phrasings already observed, and the
+ * flood returned in new wording every time. The marker and content gates are kept
+ * below as LOG FIELDS ONLY; do not restore them as forwarding logic.
  *
  * IMPORTANT: this gate must be applied on EVERY path that forwards PA's final
  * result to the channel — both the interactive `processGroupMessages` path
@@ -24,6 +30,12 @@ import { PA_NOOP_MARKER } from './config.js';
  */
 
 /**
+ * OBSERVABILITY ONLY since dev-l8uyw3 — this no longer gates the forward, because
+ * the forward is now deny-by-default and a real-work cycle (which never touches
+ * the marker) must be dropped just the same. Both call sites still log it so an
+ * operator reading a dropped record can tell a TRUE NO-OP from a real-work cycle.
+ * Kept exported for that and for its tests; do not re-wire it into the decision.
+ *
  * dev-vbyy3: report whether the PA NO-OP marker was touched at or after the
  * given cycle-start time. PA's exit protocol touches PA_NOOP_MARKER right
  * before exit ONLY on a TRUE NO-OP cycle (nothing changed, no decision posted).
@@ -49,6 +61,13 @@ export function _paNoopMarkedSince(
 }
 
 /**
+ * OBSERVABILITY ONLY since dev-l8uyw3 — this no longer gates the forward. It is
+ * the regex whose three widenings never converged: the six phrasings measured in
+ * the 2026-08-13 flood all passed it. Deny-by-default replaced it. Kept as a log
+ * field (it still usefully labels a dropped body as heartbeat-shaped) and for its
+ * tests. Do NOT add phrasings to it expecting them to suppress anything, and do
+ * not re-wire it into the decision.
+ *
  * dev-1f82i + dev-64rwo: content-based fallback gate for the PA NO-OP flood
  * (P1 dev-4ipl3).
  *
@@ -234,18 +253,76 @@ export function _paRepeatWithinCooldown(
 /**
  * Combined gate: true when PA's final-turn summary for THIS cycle should be
  * dropped rather than forwarded to the channel. Apply only for the PA main
- * group (isMain). cycleStartMs scopes the marker check to the current cycle and
- * doubles as "now" for the transient-error cooldown.
+ * group (isMain). cycleStartMs doubles as "now" for the outage cooldown.
+ *
+ * DENY-BY-DEFAULT (dev-l8uyw3). This gate used to be ALLOW-by-default: forward
+ * unless some blocklist matched. Three widenings later it still leaked, because
+ * the leaking class is not a phrasing — it is a POLARITY error. A PA cycle that
+ * does real agent-facing work (bead comment, Agent Mail reply, memory write) and
+ * correctly declines to post to Slack must NOT touch PA_NOOP_MARKER (so the
+ * marker gate misses) and phrases its summary in bespoke prose (so the content
+ * regex misses). Measured 2026-08-13T02:03Z in #pa: SIX consecutive such posts
+ * stacked on the last real decision content, in six distinct phrasings no regex
+ * anticipated. Two of them said "no post made, deliberately" in their first line
+ * and were forwarded anyway.
+ *
+ * The invariant that settles it: genuine human-facing content — decision cards
+ * (decision-formatter) and briefings (briefing.ts) — is posted by PA via the
+ * Slack MCP DURING the cycle, never through a final-result forward. So for the
+ * PA group every body that travels THIS path is, by construction, narration. The
+ * clinching observation: the genuine D60 card landed 03:11:02Z via Slack MCP and
+ * was buried three minutes later by its own final-turn echo at 03:14:10Z ("D60
+ * surfaced to Root … Clean exit."). Enumerating narration phrasings is unbounded;
+ * denying the path is not.
+ *
+ * THE ONE EXCEPTION — and why it is not "just another allow-by-default hole".
+ * When PA's `claude -p` dies before it can make any tool call (credential expiry
+ * → 401, usage wall, unrefreshable OAuth session, 5xx), the harness's own error
+ * text becomes the final-turn body. That is the ONLY class of body PA could not
+ * possibly have posted itself, so this forward is the only channel by which "PA
+ * is down" reaches Slack at all. Suppressing it unconditionally would convert a
+ * surface-burn bug into a silent pager blackout — strictly worse, and invisible.
+ * dev-v0qm6 / dev-g1q83r built that signal deliberately ("one signal, no flood")
+ * and dev-l8uyw3 names only the marker gate and the content regex as the logic to
+ * drop. So a RECOGNISED failure class is still forwarded, still at most once per
+ * cooldown window. Everything else is dropped, no matter how it is phrased.
+ *
+ * Residual, accepted knowingly: a narration body that happens to contain outage
+ * vocabulary ("weekly limit", "session expired") is classed as a failure and
+ * leaks one post per 6h per class. That is bounded and self-healing, whereas any
+ * length/position test tight enough to close it could also silence a real outage
+ * whose error text is long or prefixed. Given the asymmetry — bounded surface
+ * burn vs. a silent pager — this errs open. Close it only on measured evidence,
+ * never on speculation; pre-emptive widening is what produced this bug.
+ *
+ * _paNoopMarkedSince and _isPaNoopNarration are RETAINED but are no longer
+ * load-bearing: both call sites log them as observability fields so an operator
+ * can still tell a true NO-OP from a real-work cycle in the dropped record.
+ * _paFloodSignature likewise stays load-bearing FOR LOGGING (its body-hash
+ * fallback names dropped narration in the logs) even though the forward decision
+ * below only ever keys on a known class. Neither is dead code.
  */
 export function shouldSuppressPaNoopForward(
   isMain: boolean,
   text: string,
   cycleStartMs: number,
+  // Injectable for tests only (mirrors _paRepeatWithinCooldown). Production
+  // callers omit it and share the module-level cooldown map. Before dev-l8uyw3
+  // this composed gate had NO tests at all — only its components did — which is
+  // how an inverted polarity survived three fixes. Keep it injectable so the
+  // thing actually wired into both call sites stays the thing under test.
+  state?: Map<string, number>,
 ): boolean {
   if (!isMain) return false;
-  if (_paNoopMarkedSince(cycleStartMs) || _isPaNoopNarration(text)) return true;
-  // dev-v0qm6 / dev-g1q83r: forward the first body of each signature, drop the
-  // repeats. Applies to EVERY body, not just recognised error strings — the
-  // last two floods both arrived with text no regex here had seen before.
-  return _paRepeatWithinCooldown(text, cycleStartMs);
+  // Deny-by-default: no recognised failure class → narration → drop, whatever
+  // the marker says and however the body is worded.
+  if (_paFailureClass(text) === null) return true;
+  // Recognised outage: this is the dead-session pager. Forward the first body of
+  // the class, drop the repeats inside the window.
+  return _paRepeatWithinCooldown(
+    text,
+    cycleStartMs,
+    PA_ERROR_COOLDOWN_MS,
+    state,
+  );
 }

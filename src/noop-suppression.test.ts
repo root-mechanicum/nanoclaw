@@ -11,6 +11,7 @@ import {
   _paFailureClass,
   _paFloodSignature,
   _paRepeatWithinCooldown,
+  shouldSuppressPaNoopForward,
   PA_ERROR_COOLDOWN_MS,
   PA_FLOOD_STATE_MAX,
 } from './noop-suppression.js';
@@ -378,5 +379,207 @@ describe('_paRepeatWithinCooldown', () => {
       }
     }
     expect(forwarded).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dev-l8uyw3: the COMPOSED gate. Until this bead, shouldSuppressPaNoopForward —
+// the only function actually wired into either forward path — had NO tests at
+// all; the 26 tests above cover its components in isolation. That is how an
+// inverted polarity survived three "fixes": every component behaved exactly as
+// specified, and the composition was wrong.
+//
+// The corpus below is the measured 2026-08-13 flood in #pa (C0AG8JCNUR1),
+// CSV-parsed from conversations_history. Nine consecutive PA-authored narration
+// posts, each from a cycle that did real agent-facing work and DELIBERATELY
+// declined to post to Slack. Bodies are excerpts (opening + closing lines, where
+// the heartbeat vocabulary would live) with the Slack export's punctuation
+// normalisation; the gate is polarity-based, not phrase-based, so the verdict
+// does not depend on exact wording — which is the whole point of the fix.
+const PA_NARRATION_CORPUS: ReadonlyArray<{ at: string; body: string }> = [
+  {
+    at: '00:17:07Z',
+    body: `PA Cycle Summary 2026-08-13 00:15Z
+
+Processed CopperBridges root cause analysis for the Tailscale outage dev-qu1d4e/D59.
+Root cause confirmed: 180-day Tailscale key expiry on dev VPS.
+
+D59 now has complete fix instructions and awaits Roots ruling. Exit marker set for dispatch.`,
+  },
+  {
+    at: '00:22:03Z',
+    body: `Perfect Ive acknowledged CopperBridges correction and saved the learning to memory.
+
+Key takeaway: When health checks fail with rc 255 SSH never reached host during a known
+tailnet incident, thats an observer failure, not a subject failure.
+
+This has been saved to feedback_observer_vs_subject_failure.md so I wont repeat this pattern.`,
+  },
+  {
+    at: '00:36:47Z',
+    body: `PA Cycle Summary 2026-08-13T00:33Z
+
+Acknowledged critical feedback from GoldStream Agent Mail message 65811, re: dev-fyl3kr.
+New requirements saved to PA memory.
+
+No new urgent items requiring immediate escalation. Exiting cleanly.`,
+  },
+  {
+    at: '01:23:59Z',
+    body: `Sweep complete real work, no Slack post.
+
+Queue unchanged: 65 live gates, 8 blocked, 16 escalated, 0 uncarded, AM inbox 0 unread.
+Found and fixed D58/dev-m0xy68 P1 was DIVERGED.
+
+No Slack post, deliberately. Both findings are agent-workable, no recommendation changed.`,
+  },
+  {
+    at: '01:50:11Z',
+    body: `I can see the message from CopperForge message_id 65834. This is an FYI message.
+
+However, I notice several more urgent items in my inbox that need immediate attention:
+1. Message 65824 - TealSparrow reports GoldCompass parked for 4h0m52s on a role_pin_stall
+
+Should I proceed with a full startup sweep to triage these blockers?`,
+  },
+  {
+    at: '02:00:12Z',
+    body: `Gate sweep clean no post made, deliberately.
+
+Gates: 53 numbered gates, all carded. Only the 12 DEFERRED lack cards, which is by design.
+
+Why no Slack post: pa has six consecutive PA-authored narration posts stacked on the last
+real decision content D59, 00:15Z. A seventh post wouldnt reach Root.`,
+  },
+  {
+    at: '02:16:14Z',
+    body: `Summary
+
+Completed PA cycle with substantial work on lost gate card patches:
+1. Processed critical Agent Mail from GoldStream message 65836 about 5 gate cards.
+2. Regenerated all three lost patches from their ruling documents.
+
+All three gates are now answerable pending Roots ruling. Exiting cleanly.`,
+  },
+  {
+    // The clinching case: the genuine D60 card landed 03:11:02Z via the Slack
+    // MCP, and this final-turn echo buried it three minutes later.
+    at: '03:14:10Z',
+    body: `D60 surfaced to Root. Gate is ready, card is complete with 6 assertions, patch is pinned. Clean exit.`,
+  },
+  {
+    at: '03:20:28Z',
+    body: `Processed Agent Mail from CopperBridge about dev-ptyd0x closure and dev-nqk192 residual.
+
+Key findings:
+- dev-ptyd0x: Closed, commits eaf366243, c84d5511d.
+- dev-nqk192: New P1, needs operator on prod VPS to set GH_DEPLOY_TOKEN.
+
+Decision queue unchanged 65 items. Recorded in pa-state.md and exiting cleanly.`,
+  },
+];
+
+describe('shouldSuppressPaNoopForward (deny-by-default, dev-l8uyw3)', () => {
+  // Must be LATER than any real PA_NOOP_MARKER mtime on the host. The composed
+  // gate no longer reads the marker, but a small epoch here (e.g. 9_000_000 =
+  // 1970) makes `mtime >= cycleStartMs` true against whatever stale marker this
+  // box happens to have, which silently masked the polarity under test: with a
+  // 1970 cycle start the nine narration tests below passed against the OLD
+  // allow-by-default gate too, via a spurious marker hit rather than the change
+  // they exist to pin. A cycle start in the near future makes the marker arm
+  // provably false, so these tests fail if the polarity is ever reverted.
+  const CYCLE = Date.now() + 60_000;
+
+  it('never suppresses a non-PA group (the gate is PA-scoped)', () => {
+    const state = new Map<string, number>();
+    for (const { body } of PA_NARRATION_CORPUS) {
+      expect(shouldSuppressPaNoopForward(false, body, CYCLE, state)).toBe(false);
+    }
+  });
+
+  // The core regression: each of these nine real bodies must now be dropped.
+  for (const { at, body } of PA_NARRATION_CORPUS) {
+    it(`drops the real-work narration posted at ${at}`, () => {
+      const state = new Map<string, number>();
+      expect(shouldSuppressPaNoopForward(true, body, CYCLE, state)).toBe(true);
+    });
+  }
+
+  // NEGATIVE CONTROL. Without this, the test above proves nothing: a gate that
+  // drops everything would pass it, and so would the OLD gate if these bodies
+  // had merely matched the content regex. Pin that the old allow-by-default
+  // logic would have FORWARDED every one of them — no marker (a real-work cycle
+  // never touches it) and no narration-regex match — so these nine tests are
+  // measuring the polarity change and not a lucky regex hit.
+  for (const { at, body } of PA_NARRATION_CORPUS) {
+    it(`old allow-by-default gate would have forwarded ${at} (control)`, () => {
+      expect(_isPaNoopNarration(body)).toBe(false);
+      expect(_paFailureClass(body)).toBe(null);
+    });
+  }
+
+  // Deny-by-default is only safe because genuine content never travels this
+  // path — it is posted via the Slack MCP mid-cycle. Pin that expectation
+  // explicitly so the invariant is visible rather than folklore: yes, a decision
+  // card WOULD be dropped here, and that is why PA must never rely on the
+  // final-turn forward to reach Root.
+  it('drops even decision-card-shaped text (real cards go via Slack MCP mid-cycle)', () => {
+    const state = new Map<string, number>();
+    const card = `DECISIONS NEEDED 1 item
+
+D60: Reinstate physicality value delete status: retired
+ Bead: dev-na5dkw
+ Options: A approve both edits B approve deletion only C refuse
+
+Reply: D60=A or specify option`;
+    expect(shouldSuppressPaNoopForward(true, card, CYCLE, state)).toBe(true);
+  });
+
+  // THE PAGER MUST SURVIVE. A dead session (401 / usage wall / OAuth / 5xx) made
+  // zero tool calls, so it could not have posted anything itself: this forward is
+  // the only way "PA is down" reaches Slack. Unconditional suppression would turn
+  // a surface-burn bug into a silent blackout.
+  for (const { body, cls } of FLOOD_CORPUS) {
+    it(`still forwards the FIRST dead-session body of class ${cls}`, () => {
+      const state = new Map<string, number>();
+      expect(shouldSuppressPaNoopForward(true, body, CYCLE, state)).toBe(false);
+    });
+  }
+
+  // ...but exactly once per window. Replay each measured multi-day flood through
+  // the COMPOSED gate at the ~30min escalated-sweep cadence.
+  for (const { body, count, cls } of FLOOD_CORPUS) {
+    it(`collapses the ${count}-session ${cls} flood to <=1 post per 6h`, () => {
+      const state = new Map<string, number>();
+      let forwarded = 0;
+      for (let i = 0; i < count; i++) {
+        if (
+          !shouldSuppressPaNoopForward(
+            true,
+            body,
+            CYCLE + i * 30 * 60 * 1000,
+            state,
+          )
+        ) {
+          forwarded++;
+        }
+      }
+      const windows =
+        Math.floor((count * 30 * 60 * 1000) / PA_ERROR_COOLDOWN_MS) + 1;
+      expect(forwarded).toBeGreaterThanOrEqual(1); // pager not blacked out
+      expect(forwarded).toBeLessThanOrEqual(windows);
+      expect(forwarded).toBeLessThan(count);
+    });
+  }
+
+  // The marker is no longer load-bearing. A TRUE NO-OP cycle was already dropped
+  // by the old marker gate; assert deny-by-default did not accidentally invert
+  // that, and that a real-work cycle (no marker at all) is dropped just the same.
+  it('drops narration whether or not the NO-OP marker was touched', () => {
+    const state = new Map<string, number>();
+    const body = 'Escalated sweep complete. Nothing to surface.';
+    // No marker exists in this test env, i.e. the real-work case.
+    expect(_paNoopMarkedSince(CYCLE, markerPath)).toBe(false);
+    expect(shouldSuppressPaNoopForward(true, body, CYCLE, state)).toBe(true);
   });
 });
