@@ -1,9 +1,10 @@
-import { execFileSync, execSync } from 'child_process';
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import { clearBackup, createBackup, restoreBackup } from './backup.js';
 import { BASE_DIR, NANOCLAW_DIR } from './constants.js';
+import { git } from './git.js';
 import { acquireLock } from './lock.js';
 import { loadPathRemap, resolvePathRemap } from './path-remap.js';
 import { computeFileHash, readState, writeState } from './state.js';
@@ -142,10 +143,7 @@ export async function uninstallSkill(
         const patchPath = path.join(projectRoot, mod.patch_file);
         if (fs.existsSync(patchPath)) {
           try {
-            execFileSync('git', ['apply', '--3way', patchPath], {
-              stdio: 'pipe',
-              cwd: projectRoot,
-            });
+            git(projectRoot, ['apply', '--3way', patchPath]);
           } catch {
             // Custom patch failure is non-fatal but noted
           }

@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
@@ -115,9 +116,38 @@ describe('customize', () => {
     // Modify the tracked file
     fs.writeFileSync(trackedFile, 'export const x = 2;');
 
-    // Make the base file a directory to cause diff to exit with code 2
+    // Force `diff` to exit 2 (a real error, not "files differ").
+    //
+    // The base path must satisfy TWO conditions at once, which rules out most
+    // of the obvious arrangements:
+    //   1. fs.existsSync(basePath) must be true, or commitCustomize
+    //      substitutes /dev/null and diff never sees it at all.
+    //   2. `diff -ruN` must then fail to READ it.
+    // A directory (the original arrangement) fails (2): with -r diff descends
+    // looking for app.ts/app.ts and -N treats the missing side as empty, so
+    // it exits 1 = "files differ". Missing paths, dangling symlinks and
+    // symlink loops all fail (1) — existsSync stats them and returns false.
+    // chmod 000 fails when the suite runs as root, which it does here.
+    // /proc/self/mem stats fine and returns EIO on read for any privilege
+    // level, so it satisfies both. Linux-only, which this service is.
     const baseFilePath = path.join(tmpDir, '.nanoclaw', 'base', 'src', 'app.ts');
-    fs.mkdirSync(baseFilePath, { recursive: true });
+    fs.symlinkSync('/proc/self/mem', baseFilePath);
+
+    // Precondition: prove the arrangement still produces exit 2 BEFORE
+    // asserting on the code. Without this, an arrangement that quietly stops
+    // working (as the directory one did) reads as "the code failed to throw"
+    // and sends the next reader after the wrong defect.
+    expect(fs.existsSync(baseFilePath)).toBe(true);
+    let diffStatus: number | undefined;
+    try {
+      execFileSync('diff', ['-ruN', baseFilePath, trackedFile], {
+        encoding: 'utf-8',
+      });
+      diffStatus = 0;
+    } catch (err: any) {
+      diffStatus = err.status;
+    }
+    expect(diffStatus, 'test arrangement no longer makes diff exit 2').toBe(2);
 
     expect(() => commitCustomize()).toThrow(/diff error/i);
   });

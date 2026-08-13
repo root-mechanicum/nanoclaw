@@ -1,4 +1,4 @@
-import { execFileSync, execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -7,6 +7,7 @@ import path from 'path';
 import { clearBackup, createBackup, restoreBackup } from './backup.js';
 import { BASE_DIR, NANOCLAW_DIR } from './constants.js';
 import { copyDir } from './fs-utils.js';
+import { git } from './git.js';
 import { acquireLock } from './lock.js';
 import {
   cleanupMergeState,
@@ -200,24 +201,35 @@ export async function rebase(newBasePath?: string): Promise<RebaseResult> {
           );
           fs.writeFileSync(tmpSaved, saved);
 
-          const result = mergeFile(currentPath, oldBasePath, tmpSaved);
+          const result = mergeFile(
+            projectRoot,
+            currentPath,
+            oldBasePath,
+            tmpSaved,
+          );
           fs.unlinkSync(tmpSaved);
 
           if (!result.clean) {
             // Try rerere resolution (three-level model)
-            if (isGitRepo()) {
+            if (isGitRepo(projectRoot)) {
               const baseContent = fs.readFileSync(oldBasePath, 'utf-8');
-              setupRerereAdapter(relPath, baseContent, oursContent, saved);
-              const autoResolved = runRerere(currentPath);
+              setupRerereAdapter(
+                projectRoot,
+                relPath,
+                baseContent,
+                oursContent,
+                saved,
+              );
+              const autoResolved = runRerere(projectRoot, currentPath);
 
               if (autoResolved) {
-                execFileSync('git', ['add', relPath], { stdio: 'pipe' });
-                execSync('git rerere', { stdio: 'pipe' });
-                cleanupMergeState(relPath);
+                git(projectRoot, ['add', relPath]);
+                git(projectRoot, ['rerere']);
+                cleanupMergeState(projectRoot, relPath);
                 continue;
               }
 
-              cleanupMergeState(relPath);
+              cleanupMergeState(projectRoot, relPath);
             }
 
             // Unresolved — conflict markers remain in working tree

@@ -1,9 +1,10 @@
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+
 import { parse, stringify } from 'yaml';
 
 import { NANOCLAW_DIR, RESOLUTIONS_DIR, SHIPPED_RESOLUTIONS_DIR } from './constants.js';
+import { git } from './git.js';
 import { computeFileHash } from './state.js';
 import { FileInputHashes, ResolutionMeta } from './types.js';
 
@@ -67,10 +68,7 @@ export function loadResolutions(
   // Get the git directory
   let gitDir: string;
   try {
-    gitDir = execSync('git rev-parse --git-dir', {
-      encoding: 'utf-8',
-      cwd: projectRoot,
-    }).trim();
+    gitDir = git(projectRoot, ['rev-parse', '--git-dir']);
     if (!path.isAbsolute(gitDir)) {
       gitDir = path.join(projectRoot, gitDir);
     }
@@ -156,10 +154,7 @@ export function saveResolution(
   // Get the git rr-cache directory to find actual rerere hashes
   let rrCacheDir: string | null = null;
   try {
-    let gitDir = execSync('git rev-parse --git-dir', {
-      encoding: 'utf-8',
-      cwd: projectRoot,
-    }).trim();
+    let gitDir = git(projectRoot, ['rev-parse', '--git-dir']);
     if (!path.isAbsolute(gitDir)) {
       gitDir = path.join(projectRoot, gitDir);
     }

@@ -191,6 +191,19 @@ export function mergeDockerComposeServices(
   fs.writeFileSync(composePath, stringify(compose), 'utf-8');
 }
 
-export function runNpmInstall(): void {
-  execSync('npm install --legacy-peer-deps', { stdio: 'inherit', cwd: process.cwd() });
+/**
+ * `projectRoot` is required: an `npm install` that inherits process.cwd() is
+ * the same class of hazard as an inherited-cwd `git reset` (dev-2h43mx).
+ */
+export function runNpmInstall(projectRoot: string): void {
+  if (typeof projectRoot !== 'string' || projectRoot.length === 0) {
+    throw new Error(
+      'runNpmInstall(): an explicit projectRoot is required; ' +
+        'refusing to run npm install against the inherited working directory',
+    );
+  }
+  execSync('npm install --legacy-peer-deps', {
+    stdio: 'inherit',
+    cwd: projectRoot,
+  });
 }

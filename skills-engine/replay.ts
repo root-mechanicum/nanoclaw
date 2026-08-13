@@ -1,4 +1,3 @@
-import { execFileSync, execSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -6,6 +5,7 @@ import path from 'path';
 
 import { BASE_DIR, NANOCLAW_DIR } from './constants.js';
 import { copyDir } from './fs-utils.js';
+import { git } from './git.js';
 import { readManifest } from './manifest.js';
 import {
   cleanupMergeState,
@@ -197,7 +197,7 @@ export async function replaySkills(
         );
         fs.copyFileSync(currentPath, tmpCurrent);
 
-        const result = mergeFile(tmpCurrent, basePath, skillPath);
+        const result = mergeFile(projectRoot, tmpCurrent, basePath, skillPath);
 
         if (result.clean) {
           fs.copyFileSync(tmpCurrent, currentPath);
@@ -206,26 +206,27 @@ export async function replaySkills(
           fs.copyFileSync(tmpCurrent, currentPath);
           fs.unlinkSync(tmpCurrent);
 
-          if (isGitRepo()) {
+          if (isGitRepo(projectRoot)) {
             const baseContent = fs.readFileSync(basePath, 'utf-8');
             const theirsContent = fs.readFileSync(skillPath, 'utf-8');
 
             setupRerereAdapter(
+              projectRoot,
               resolvedPath,
               baseContent,
               oursContent,
               theirsContent,
             );
-            const autoResolved = runRerere(currentPath);
+            const autoResolved = runRerere(projectRoot, currentPath);
 
             if (autoResolved) {
-              execFileSync('git', ['add', resolvedPath], { stdio: 'pipe' });
-              execSync('git rerere', { stdio: 'pipe' });
-              cleanupMergeState(resolvedPath);
+              git(projectRoot, ['add', resolvedPath]);
+              git(projectRoot, ['rerere']);
+              cleanupMergeState(projectRoot, resolvedPath);
               continue;
             }
 
-            cleanupMergeState(resolvedPath);
+            cleanupMergeState(projectRoot, resolvedPath);
           }
 
           skillConflicts.push(resolvedPath);
@@ -299,7 +300,7 @@ export async function replaySkills(
   // 5. Run npm install if any deps
   if (hasNpmDeps) {
     try {
-      runNpmInstall();
+      runNpmInstall(projectRoot);
     } catch {
       // npm install failure is non-fatal for replay
     }

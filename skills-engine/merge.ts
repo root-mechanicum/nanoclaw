@@ -1,16 +1,17 @@
-import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { git, gitOk } from './git.js';
 import { MergeResult } from './types.js';
 
-export function isGitRepo(): boolean {
-  try {
-    execSync('git rev-parse --git-dir', { stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Every function in this module takes the repository root as its FIRST
+ * argument. It is deliberately not optional and does not default to
+ * `process.cwd()` — see the header of ./git.ts (dev-2h43mx).
+ */
+
+export function isGitRepo(cwd: string): boolean {
+  return gitOk(cwd, ['rev-parse', '--git-dir']);
 }
 
 /**
@@ -20,14 +21,13 @@ export function isGitRepo(): boolean {
  * { clean: false, exitCode: N } on conflict (N = number of conflicts).
  */
 export function mergeFile(
+  cwd: string,
   currentPath: string,
   basePath: string,
   skillPath: string,
 ): MergeResult {
   try {
-    execFileSync('git', ['merge-file', currentPath, basePath, skillPath], {
-      stdio: 'pipe',
-    });
+    git(cwd, ['merge-file', currentPath, basePath, skillPath]);
     return { clean: true, exitCode: 0 };
   } catch (err: any) {
     const exitCode = err.status ?? 1;
@@ -45,35 +45,31 @@ export function mergeFile(
  * Creates stages 1/2/3 so git rerere can record/resolve conflicts.
  */
 export function setupRerereAdapter(
+  cwd: string,
   filePath: string,
   baseContent: string,
   oursContent: string,
   theirsContent: string,
 ): void {
-  if (!isGitRepo()) return;
+  if (!isGitRepo(cwd)) return;
 
-  const gitDir = execSync('git rev-parse --git-dir', {
-    encoding: 'utf-8',
-  }).trim();
+  const gitDir = resolveGitDir(cwd);
 
   // Clean up stale MERGE_HEAD from a previous crash
   if (fs.existsSync(path.join(gitDir, 'MERGE_HEAD'))) {
-    cleanupMergeState(filePath);
+    cleanupMergeState(cwd, filePath);
   }
 
   // Hash objects into git object store
-  const baseHash = execSync('git hash-object -w --stdin', {
+  const baseHash = git(cwd, ['hash-object', '-w', '--stdin'], {
     input: baseContent,
-    encoding: 'utf-8',
-  }).trim();
-  const oursHash = execSync('git hash-object -w --stdin', {
+  });
+  const oursHash = git(cwd, ['hash-object', '-w', '--stdin'], {
     input: oursContent,
-    encoding: 'utf-8',
-  }).trim();
-  const theirsHash = execSync('git hash-object -w --stdin', {
+  });
+  const theirsHash = git(cwd, ['hash-object', '-w', '--stdin'], {
     input: theirsContent,
-    encoding: 'utf-8',
-  }).trim();
+  });
 
   // Create unmerged index entries (stages 1/2/3)
   const indexInfo = [
@@ -82,15 +78,10 @@ export function setupRerereAdapter(
     `100644 ${theirsHash} 3\t${filePath}`,
   ].join('\n');
 
-  execSync('git update-index --index-info', {
-    input: indexInfo,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  git(cwd, ['update-index', '--index-info'], { input: indexInfo });
 
   // Set MERGE_HEAD and MERGE_MSG (required for rerere)
-  const headHash = execSync('git rev-parse HEAD', {
-    encoding: 'utf-8',
-  }).trim();
+  const headHash = git(cwd, ['rev-parse', 'HEAD']);
   fs.writeFileSync(path.join(gitDir, 'MERGE_HEAD'), headHash + '\n');
   fs.writeFileSync(
     path.join(gitDir, 'MERGE_MSG'),
@@ -100,14 +91,14 @@ export function setupRerereAdapter(
 
 /**
  * Run git rerere to record or auto-resolve conflicts.
- * When filePath is given, checks that specific file for remaining conflict markers.
+ * Checks `filePath` (an absolute working-tree path) for remaining conflict markers.
  * Returns true if rerere auto-resolved the conflict.
  */
-export function runRerere(filePath: string): boolean {
-  if (!isGitRepo()) return false;
+export function runRerere(cwd: string, filePath: string): boolean {
+  if (!isGitRepo(cwd)) return false;
 
   try {
-    execSync('git rerere', { stdio: 'pipe' });
+    git(cwd, ['rerere']);
 
     // Check if the specific working tree file still has conflict markers.
     // rerere resolves the working tree but does NOT update the index,
@@ -121,14 +112,17 @@ export function runRerere(filePath: string): boolean {
 
 /**
  * Clean up merge state after rerere operations.
- * Pass filePath to only reset that file's index entries (preserving user's staged changes).
+ *
+ * `filePath` is REQUIRED: only that path's index entries are reset, so the
+ * user's pre-existing staged changes survive. The former bare `git reset`
+ * fallback (which unstaged the WHOLE index of whatever repo git happened to
+ * be pointed at) has been removed — an unscoped index reset has no safe use
+ * inside a library (dev-2h43mx).
  */
-export function cleanupMergeState(filePath?: string): void {
-  if (!isGitRepo()) return;
+export function cleanupMergeState(cwd: string, filePath: string): void {
+  if (!isGitRepo(cwd)) return;
 
-  const gitDir = execSync('git rev-parse --git-dir', {
-    encoding: 'utf-8',
-  }).trim();
+  const gitDir = resolveGitDir(cwd);
 
   // Remove merge markers
   const mergeHead = path.join(gitDir, 'MERGE_HEAD');
@@ -136,15 +130,13 @@ export function cleanupMergeState(filePath?: string): void {
   if (fs.existsSync(mergeHead)) fs.unlinkSync(mergeHead);
   if (fs.existsSync(mergeMsg)) fs.unlinkSync(mergeMsg);
 
-  // Reset only the specific file's unmerged index entries to avoid
-  // dropping the user's pre-existing staged changes
-  try {
-    if (filePath) {
-      execFileSync('git', ['reset', '--', filePath], { stdio: 'pipe' });
-    } else {
-      execSync('git reset', { stdio: 'pipe' });
-    }
-  } catch {
-    // May fail if nothing staged
-  }
+  // Reset only the specific file's unmerged index entries. May exit non-zero
+  // if nothing is staged for that path, which is fine.
+  gitOk(cwd, ['reset', '--', filePath]);
+}
+
+/** Absolute path to the .git directory of the repo rooted at `cwd`. */
+function resolveGitDir(cwd: string): string {
+  const gitDir = git(cwd, ['rev-parse', '--git-dir']);
+  return path.isAbsolute(gitDir) ? gitDir : path.join(cwd, gitDir);
 }

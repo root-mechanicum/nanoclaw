@@ -1,8 +1,8 @@
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import { BACKUP_DIR, BASE_DIR, NANOCLAW_DIR } from './constants.js';
+import { gitOk } from './git.js';
 import { isGitRepo } from './merge.js';
 import { writeState } from './state.js';
 import { SkillState } from './types.js';
@@ -62,12 +62,9 @@ export function initNanoclawDir(): void {
   writeState(initialState);
 
   // Enable git rerere if in a git repo
-  if (isGitRepo()) {
-    try {
-      execSync('git config --local rerere.enabled true', { stdio: 'pipe' });
-    } catch {
-      // Non-fatal
-    }
+  if (isGitRepo(projectRoot)) {
+    // Non-fatal if it fails
+    gitOk(projectRoot, ['config', '--local', 'rerere.enabled', 'true']);
   }
 }
 

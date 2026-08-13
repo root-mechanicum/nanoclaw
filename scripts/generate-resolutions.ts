@@ -83,7 +83,7 @@ for (const relPath of conflictFiles) {
   // Do the merge to produce conflict markers
   const tmpFile = path.join(os.tmpdir(), `nanoclaw-gen-${Date.now()}-${path.basename(relPath)}`);
   fs.copyFileSync(oursPath, tmpFile);
-  const result = mergeFile(tmpFile, basePath, theirsPath);
+  const result = mergeFile(projectRoot, tmpFile, basePath, theirsPath);
 
   if (result.clean) {
     console.log(`${relPath}: clean merge, no resolution needed`);
@@ -114,7 +114,7 @@ for (const relPath of conflictFiles) {
   const baseContent = fs.readFileSync(basePath, 'utf-8');
   const oursContent = fs.readFileSync(oursPath, 'utf-8');
   const theirsContent = fs.readFileSync(theirsPath, 'utf-8');
-  setupRerereAdapter(relPath, baseContent, oursContent, theirsContent);
+  setupRerereAdapter(projectRoot, relPath, baseContent, oursContent, theirsContent);
   execSync('git rerere', { stdio: 'pipe', cwd: projectRoot });
 
   // Find the new rr-cache entry (the hash)
@@ -123,7 +123,7 @@ for (const relPath of conflictFiles) {
 
   if (newEntries.length !== 1) {
     console.error(`${relPath}: expected 1 new rr-cache entry, got ${newEntries.length}`);
-    cleanupMergeState(relPath);
+    cleanupMergeState(projectRoot, relPath);
     fs.writeFileSync(path.join(projectRoot, relPath), origContent);
     continue;
   }
@@ -136,7 +136,7 @@ for (const relPath of conflictFiles) {
   execSync('git rerere', { stdio: 'pipe', cwd: projectRoot });
 
   // Clean up
-  cleanupMergeState(relPath);
+  cleanupMergeState(projectRoot, relPath);
   fs.writeFileSync(path.join(projectRoot, relPath), origContent);
 
   // Save to .claude/resolutions/

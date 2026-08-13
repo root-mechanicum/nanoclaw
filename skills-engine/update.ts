@@ -1,4 +1,4 @@
-import { execFileSync, execSync } from 'child_process';
+import { execSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -9,6 +9,7 @@ import { parse as parseYaml } from 'yaml';
 import { clearBackup, createBackup, restoreBackup } from './backup.js';
 import { BASE_DIR, NANOCLAW_DIR } from './constants.js';
 import { copyDir } from './fs-utils.js';
+import { git } from './git.js';
 import { isCustomizeActive } from './customize.js';
 import { acquireLock } from './lock.js';
 import {
@@ -180,7 +181,12 @@ export async function applyUpdate(newCorePath: string): Promise<UpdateResult> {
       );
       fs.copyFileSync(currentPath, tmpCurrent);
 
-      const result = mergeFile(tmpCurrent, basePath, newCoreSrcPath);
+      const result = mergeFile(
+        projectRoot,
+        tmpCurrent,
+        basePath,
+        newCoreSrcPath,
+      );
 
       if (result.clean) {
         fs.copyFileSync(tmpCurrent, currentPath);
@@ -190,21 +196,27 @@ export async function applyUpdate(newCorePath: string): Promise<UpdateResult> {
         fs.copyFileSync(tmpCurrent, currentPath);
         fs.unlinkSync(tmpCurrent);
 
-        if (isGitRepo()) {
+        if (isGitRepo(projectRoot)) {
           const baseContent = fs.readFileSync(basePath, 'utf-8');
           const theirsContent = fs.readFileSync(newCoreSrcPath, 'utf-8');
 
-          setupRerereAdapter(relPath, baseContent, oursContent, theirsContent);
-          const autoResolved = runRerere(currentPath);
+          setupRerereAdapter(
+            projectRoot,
+            relPath,
+            baseContent,
+            oursContent,
+            theirsContent,
+          );
+          const autoResolved = runRerere(projectRoot, currentPath);
 
           if (autoResolved) {
-            execFileSync('git', ['add', relPath], { stdio: 'pipe' });
-            execSync('git rerere', { stdio: 'pipe' });
-            cleanupMergeState(relPath);
+            git(projectRoot, ['add', relPath]);
+            git(projectRoot, ['rerere']);
+            cleanupMergeState(projectRoot, relPath);
             continue;
           }
 
-          cleanupMergeState(relPath);
+          cleanupMergeState(projectRoot, relPath);
         }
 
         mergeConflicts.push(relPath);
@@ -244,10 +256,7 @@ export async function applyUpdate(newCorePath: string): Promise<UpdateResult> {
           continue;
         }
         try {
-          execFileSync('git', ['apply', '--3way', patchPath], {
-            stdio: 'pipe',
-            cwd: projectRoot,
-          });
+          git(projectRoot, ['apply', '--3way', patchPath]);
         } catch {
           customPatchFailures.push(mod.description);
         }
@@ -311,7 +320,7 @@ export async function applyUpdate(newCorePath: string): Promise<UpdateResult> {
     }
 
     if (hasNpmDeps) {
-      runNpmInstall();
+      runNpmInstall(projectRoot);
     }
 
     // --- Run tests for each applied skill ---

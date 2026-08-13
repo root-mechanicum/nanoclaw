@@ -5,27 +5,28 @@ import path from 'path';
 import { isGitRepo, mergeFile, setupRerereAdapter } from '../merge.js';
 import { createTempDir, initGitRepo, cleanup } from './test-helpers.js';
 
+// NOTE: this file deliberately does NOT call process.chdir(). merge.ts takes
+// the repository root as an explicit argument, so isolation is by ARGUMENT,
+// not by process-global ambient state (dev-2h43mx).
+
 describe('merge', () => {
   let tmpDir: string;
-  const originalCwd = process.cwd();
 
   beforeEach(() => {
     tmpDir = createTempDir();
-    process.chdir(tmpDir);
   });
 
   afterEach(() => {
-    process.chdir(originalCwd);
     cleanup(tmpDir);
   });
 
   it('isGitRepo returns true in a git repo', () => {
     initGitRepo(tmpDir);
-    expect(isGitRepo()).toBe(true);
+    expect(isGitRepo(tmpDir)).toBe(true);
   });
 
   it('isGitRepo returns false outside a git repo', () => {
-    expect(isGitRepo()).toBe(false);
+    expect(isGitRepo(tmpDir)).toBe(false);
   });
 
   describe('mergeFile', () => {
@@ -42,7 +43,7 @@ describe('merge', () => {
       fs.writeFileSync(current, 'line1-modified\nline2\nline3\n');
       fs.writeFileSync(skill, 'line1\nline2\nline3-modified\n');
 
-      const result = mergeFile(current, base, skill);
+      const result = mergeFile(tmpDir, current, base, skill);
       expect(result.clean).toBe(true);
       expect(result.exitCode).toBe(0);
 
@@ -53,10 +54,7 @@ describe('merge', () => {
 
     it('setupRerereAdapter cleans stale MERGE_HEAD before proceeding', () => {
       // Simulate a stale MERGE_HEAD from a previous crash
-      const gitDir = execSync('git rev-parse --git-dir', {
-        cwd: tmpDir,
-        encoding: 'utf-8',
-      }).trim();
+      const gitDir = path.join(tmpDir, '.git');
       const headHash = execSync('git rev-parse HEAD', {
         cwd: tmpDir,
         encoding: 'utf-8',
@@ -69,11 +67,18 @@ describe('merge', () => {
 
       // setupRerereAdapter should not throw despite stale MERGE_HEAD
       expect(() =>
-        setupRerereAdapter('test.txt', 'base', 'ours', 'theirs'),
+        setupRerereAdapter(tmpDir, 'test.txt', 'base', 'ours', 'theirs'),
       ).not.toThrow();
 
       // MERGE_HEAD should still exist (newly written by setupRerereAdapter)
       expect(fs.existsSync(path.join(gitDir, 'MERGE_HEAD'))).toBe(true);
+
+      // The unmerged entries must have landed in the TEMP repo's index.
+      const staged = execSync('git ls-files -u', {
+        cwd: tmpDir,
+        encoding: 'utf-8',
+      });
+      expect(staged).toContain('test.txt');
     });
 
     it('conflict with overlapping changes', () => {
@@ -85,7 +90,7 @@ describe('merge', () => {
       fs.writeFileSync(current, 'line1-ours\nline2\nline3\n');
       fs.writeFileSync(skill, 'line1-theirs\nline2\nline3\n');
 
-      const result = mergeFile(current, base, skill);
+      const result = mergeFile(tmpDir, current, base, skill);
       expect(result.clean).toBe(false);
       expect(result.exitCode).toBeGreaterThan(0);
 

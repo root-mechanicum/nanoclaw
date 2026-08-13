@@ -1,4 +1,4 @@
-import { execFileSync, execSync } from 'child_process';
+import { execSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -7,6 +7,7 @@ import path from 'path';
 import { clearBackup, createBackup, restoreBackup } from './backup.js';
 import { NANOCLAW_DIR } from './constants.js';
 import { copyDir } from './fs-utils.js';
+import { git, gitOk } from './git.js';
 import { isCustomizeActive } from './customize.js';
 import { executeFileOps } from './file-ops.js';
 import { acquireLock } from './lock.js';
@@ -209,7 +210,7 @@ export async function applySkill(skillDir: string): Promise<ApplyResult> {
       );
       fs.copyFileSync(currentPath, tmpCurrent);
 
-      const result = mergeFile(tmpCurrent, basePath, skillPath);
+      const result = mergeFile(projectRoot, tmpCurrent, basePath, skillPath);
 
       if (result.clean) {
         fs.copyFileSync(tmpCurrent, currentPath);
@@ -220,28 +221,33 @@ export async function applySkill(skillDir: string): Promise<ApplyResult> {
         fs.copyFileSync(tmpCurrent, currentPath);
         fs.unlinkSync(tmpCurrent);
 
-        if (isGitRepo()) {
+        if (isGitRepo(projectRoot)) {
           const baseContent = fs.readFileSync(basePath, 'utf-8');
           const theirsContent = fs.readFileSync(skillPath, 'utf-8');
 
-          setupRerereAdapter(resolvedPath, baseContent, oursContent, theirsContent);
-          const autoResolved = runRerere(currentPath);
+          setupRerereAdapter(
+            projectRoot,
+            resolvedPath,
+            baseContent,
+            oursContent,
+            theirsContent,
+          );
+          const autoResolved = runRerere(projectRoot, currentPath);
 
           if (autoResolved) {
             // rerere resolved the conflict — currentPath now has resolved content
             // Record the resolution: git add + git rerere
-            execFileSync('git', ['add', resolvedPath], { stdio: 'pipe' });
-            execSync('git rerere', { stdio: 'pipe' });
-            cleanupMergeState(resolvedPath);
+            git(projectRoot, ['add', resolvedPath]);
+            git(projectRoot, ['rerere']);
+            cleanupMergeState(projectRoot, resolvedPath);
             // Unstage the file — cleanupMergeState clears unmerged entries
             // but the git add above leaves the file staged at stage 0
-            try {
-              execFileSync('git', ['restore', '--staged', resolvedPath], { stdio: 'pipe' });
-            } catch { /* may fail if file is new or not tracked */ }
+            // (may fail if file is new or not tracked)
+            gitOk(projectRoot, ['restore', '--staged', resolvedPath]);
             continue;
           }
 
-          cleanupMergeState(resolvedPath);
+          cleanupMergeState(projectRoot, resolvedPath);
         }
 
         // Unresolved conflict — currentPath already has conflict markers
@@ -286,7 +292,7 @@ export async function applySkill(skillDir: string): Promise<ApplyResult> {
       manifest.structured?.npm_dependencies &&
       Object.keys(manifest.structured.npm_dependencies).length > 0
     ) {
-      runNpmInstall();
+      runNpmInstall(projectRoot);
     }
 
     // --- Post-apply commands ---
