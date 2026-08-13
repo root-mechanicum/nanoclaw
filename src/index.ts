@@ -467,17 +467,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           `Agent output: ${raw.slice(0, 200)}`,
         );
         if (text) {
-          // dev-vbyy3 + dev-1f82i: on a TRUE NO-OP PA cycle, suppress forwarding
-          // the final summary text to #pa. Two independent gates, OR'd so either
-          // catches the flood:
-          //   (1) marker gate (dev-vbyy3): PA touched PA_NOOP_MARKER this cycle.
-          //   (2) content gate (dev-1f82i): the summary body reads like NO-OP
-          //       heartbeat narration. Robust to the observed failure where PA
-          //       never touches the marker (wake via scheduled sweep) yet still
-          //       emits a "exited silently" summary that reaches #pa.
-          // Forwarding either is surface-burn that buries genuine decision cards.
-          // Genuine decision cards are posted via the Slack MCP during the cycle,
-          // not via this final-result forward, so they are unaffected.
+          // dev-l8uyw3: this forward is DENY-BY-DEFAULT for the PA main group.
+          // Every body arriving here is narration by construction — genuine
+          // decision cards and briefings are posted via the Slack MCP DURING the
+          // cycle, never through a final-result forward — so the only body that
+          // survives is a recognised dead-session outage ("PA is down"), at most
+          // once per class per cooldown window.
+          //
+          // This comment previously described the marker gate (dev-vbyy3) and the
+          // content regex (dev-1f82i) as two gates OR'd together to decide the
+          // forward. That is NO LONGER the logic and must not be restored: three
+          // widenings of those blocklists each leaked in new wording, because the
+          // leaking class is a polarity error rather than a phrasing. Both
+          // helpers survive as LOG FIELDS ONLY (see below), which is why they are
+          // still imported here. Full argument in noop-suppression.ts.
           if (shouldSuppressPaNoopForward(isMainGroup, text, cycleStartMs)) {
             logger.info(
               {

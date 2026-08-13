@@ -26,7 +26,9 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import {
+  _isPaNoopNarration,
   _paFloodSignature,
+  _paNoopMarkedSince,
   shouldSuppressPaNoopForward,
 } from './noop-suppression.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
@@ -207,6 +209,16 @@ async function runTask(
               {
                 taskId: task.id,
                 group: group.name,
+                // dev-uojj0b: log the SAME two observability fields the
+                // interactive site logs. Without them this path — the one the
+                // ~30min escalated sweep actually travels — records a drop with
+                // no way to tell a TRUE NO-OP cycle from a real-work cycle, and
+                // verifying that the deny-by-default arm carried a drop on its
+                // own required reconstructing the marker state from mtimes. Both
+                // helpers are pure (a statSync and a regex test) and neither is
+                // wired into the decision above; see noop-suppression.ts.
+                markerGate: _paNoopMarkedSince(startTime),
+                contentGate: _isPaNoopNarration(streamedOutput.result),
                 // dev-g1q83r: name WHY it was dropped. This is the path the
                 // ~30min escalated sweep travels, i.e. the one that carried both
                 // the 07-24 OAuth flood and the 07-31 usage-limit flood.
