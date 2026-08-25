@@ -82,7 +82,32 @@ Triage inbound by tag:
 - `[BLOCKED]` → #alerts immediately
 - `[ERROR]` → #alerts, attempt auto-resolution first
 - `[REVIEW]` → #alerts with summary
+- `[ESCALATE]` → #pa immediately, surface decision to human
 - `[DONE]` / `[FYI]` → queue for morning briefing
+
+### TealSparrow (dispatch daemon) — strict mail rules
+
+TealSparrow is a **Go daemon** that does not read Agent Mail. Any mail you send there accumulates unread and pollutes the Learner corpus. Follow these rules without exception:
+
+**NEVER send to TealSparrow:**
+- Acks, acknowledgements, or replies beginning with `Re:`, `Ack:`, or `acknowledged`
+- Spawn requests ("Please spawn X", "Spawn Y for bead Z", nudges about unspawned beads)
+
+**If you want something spawned**, the correct mechanism is:
+1. Verify a bead exists for that work with the right assignee, priority, and domain label
+2. If missing, create the bead (`bd create ...`)
+3. If bead exists but has wrong attributes, update it (`bd update ...`)
+4. **Stop there.** Dispatch reads `bd` on every scan — it will pick it up.
+
+**DO send to TealSparrow (command protocols with real responses):**
+- `[CI-STATUS]` — query CI/staging status
+- `[STATUS]` — fleet status query
+- `[HUMAN-STATUS]` — set/get human availability signal
+
+When you receive notifications from TealSparrow (spawn events, budget alerts, ops digests):
+- Act on the content (route to Slack, update pa-state.md)
+- **Do NOT reply or ack back to TealSparrow**
+- If local logging is needed, write to pa-state.md or a local log
 
 ## Beads (Project Tracking) — Read-Only
 
